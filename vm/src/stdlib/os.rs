@@ -10,23 +10,29 @@ use crossbeam_utils::atomic::AtomicCell;
 use num_traits::ToPrimitive;
 
 use super::errno::errors;
+use crate::builtins::bytes::{PyBytes, PyBytesRef};
+use crate::builtins::dict::PyDictRef;
+use crate::builtins::int::{PyInt, PyIntRef};
+use crate::builtins::pystr::{PyStr, PyStrRef};
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::set::PySet;
+use crate::builtins::tuple::PyTupleRef;
 use crate::byteslike::PyBytesLike;
 use crate::common::lock::PyRwLock;
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
-use crate::function::{IntoPyNativeFunc, OptionalArg, PyFuncArgs};
-use crate::obj::objbytes::{PyBytes, PyBytesRef};
-use crate::obj::objdict::PyDictRef;
-use crate::obj::objint::{PyInt, PyIntRef};
-use crate::obj::objiter;
-use crate::obj::objset::PySet;
-use crate::obj::objstr::{PyStr, PyStrRef};
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyTypeRef;
+use crate::function::{FuncArgs, IntoPyNativeFunc, OptionalArg};
 use crate::pyobject::{
     BorrowValue, Either, IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult,
-    PyStructSequence, PyValue, TryFromObject, TypeProtocol,
+    PyStructSequence, PyValue, StaticType, TryFromObject, TypeProtocol,
 };
 use crate::vm::VirtualMachine;
+
+// this is basically what CPython has for Py_off_t; windows uses long long
+// for offsets, other platforms just use off_t
+#[cfg(not(windows))]
+pub type Offset = libc::off_t;
+#[cfg(windows)]
+pub type Offset = libc::c_longlong;
 
 #[derive(Debug, Copy, Clone)]
 enum OutputMode {
@@ -68,6 +74,24 @@ impl OutputMode {
     }
 }
 
+fn osstr_contains_nul(s: &ffi::OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        s.as_bytes().contains(&b'\0')
+    }
+    #[cfg(target_os = "wasi")]
+    {
+        use std::os::wasi::ffi::OsStrExt;
+        s.as_bytes().contains(&b'\0')
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        s.encode_wide().any(|c| c == 0)
+    }
+}
+
 pub struct PyPathLike {
     pub path: PathBuf,
     mode: OutputMode,
@@ -87,6 +111,12 @@ fn fs_metadata<P: AsRef<Path>>(path: P, follow_symlink: bool) -> io::Result<fs::
         fs::metadata(path.as_ref())
     } else {
         fs::symlink_metadata(path.as_ref())
+    }
+}
+
+impl AsRef<Path> for PyPathLike {
+    fn as_ref(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -112,15 +142,15 @@ impl TryFromObject for PyPathLike {
         let method = vm.get_method_or_type_error(obj.clone(), "__fspath__", || {
             format!(
                 "expected str, bytes or os.PathLike object, not '{}'",
-                obj.lease_class().name
+                obj.class().name
             )
         })?;
-        let result = vm.invoke(&method, PyFuncArgs::default())?;
+        let result = vm.invoke(&method, ())?;
         match1(&result)?.ok_or_else(|| {
             vm.new_type_error(format!(
                 "expected {}.__fspath__() to return str or bytes, not '{}'",
-                obj.lease_class().name,
-                result.lease_class().name,
+                obj.class().name,
+                result.class().name,
             ))
         })
     }
@@ -250,7 +280,7 @@ fn os_unimpl<T>(func: &str, vm: &VirtualMachine) -> PyResult<T> {
 
 #[pymodule]
 mod _os {
-    use super::platform::OpenFlags;
+    use super::OpenFlags;
     use super::*;
 
     #[pyattr]
@@ -258,6 +288,9 @@ mod _os {
         O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END,
         SEEK_SET,
     };
+    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "linux"))]
+    #[pyattr]
+    use libc::{SEEK_DATA, SEEK_HOLE};
     #[pyattr]
     pub(super) const F_OK: u8 = 0;
     #[pyattr]
@@ -288,6 +321,9 @@ mod _os {
             dir_fd: dir_fd.into_option(),
         };
         let fname = make_path(vm, &name, &dir_fd)?;
+        if osstr_contains_nul(fname) {
+            return Err(vm.new_value_error("embedded null character".to_owned()));
+        }
 
         let mut options = OpenOptions::new();
 
@@ -334,8 +370,63 @@ mod _os {
 
     #[cfg(not(any(unix, windows, target_os = "wasi")))]
     #[pyfunction]
-    pub(crate) fn open(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult {
+    pub(crate) fn open(vm: &VirtualMachine, args: FuncArgs) -> PyResult {
         Err(vm.new_os_error("os.open not implemented on this platform".to_owned()))
+    }
+
+    #[cfg(any(target_os = "linux"))]
+    #[pyfunction]
+    fn sendfile(out_fd: i32, in_fd: i32, offset: i64, count: u64, vm: &VirtualMachine) -> PyResult {
+        let mut file_offset = offset;
+
+        let res =
+            nix::sys::sendfile::sendfile(out_fd, in_fd, Some(&mut file_offset), count as usize)
+                .map_err(|err| err.into_pyexception(vm))?;
+        Ok(vm.ctx.new_int(res as u64))
+    }
+
+    #[cfg(any(target_os = "macos"))]
+    #[pyfunction]
+    fn sendfile(
+        out_fd: i32,
+        in_fd: i32,
+        offset: i64,
+        count: i64,
+        headers: OptionalArg<PyObjectRef>,
+        trailers: OptionalArg<PyObjectRef>,
+        _flags: OptionalArg<i32>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        let headers = match headers.into_option() {
+            Some(x) => Some(vm.extract_elements::<PyBytesLike>(&x)?),
+            None => None,
+        };
+
+        let headers = headers
+            .as_ref()
+            .map(|v| v.iter().map(|b| b.borrow_value()).collect::<Vec<_>>());
+        let headers = headers
+            .as_ref()
+            .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
+        let headers = headers.as_deref();
+
+        let trailers = match trailers.into_option() {
+            Some(x) => Some(vm.extract_elements::<PyBytesLike>(&x)?),
+            None => None,
+        };
+
+        let trailers = trailers
+            .as_ref()
+            .map(|v| v.iter().map(|b| b.borrow_value()).collect::<Vec<_>>());
+        let trailers = trailers
+            .as_ref()
+            .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
+        let trailers = trailers.as_deref();
+
+        let (res, written) =
+            nix::sys::sendfile::sendfile(in_fd, out_fd, offset, Some(count), headers, trailers);
+        res.map_err(|err| err.into_pyexception(vm))?;
+        Ok(vm.ctx.new_int(written as u64))
     }
 
     #[pyfunction]
@@ -383,7 +474,17 @@ mod _os {
     #[pyfunction]
     fn remove(path: PyPathLike, dir_fd: DirFd, vm: &VirtualMachine) -> PyResult<()> {
         let path = make_path(vm, &path, &dir_fd)?;
-        fs::remove_file(path).map_err(|err| err.into_pyexception(vm))
+        let is_junction = cfg!(windows)
+            && fs::symlink_metadata(path).map_or(false, |meta| {
+                let ty = meta.file_type();
+                ty.is_dir() && ty.is_symlink()
+            });
+        let res = if is_junction {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+        res.map_err(|err| err.into_pyexception(vm))
     }
 
     #[pyfunction]
@@ -465,8 +566,8 @@ mod _os {
     }
 
     impl PyValue for DirEntry {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class(super::MODULE_NAME, "DirEntry")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -550,8 +651,8 @@ mod _os {
     }
 
     impl PyValue for ScandirIterator {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class(super::MODULE_NAME, "ScandirIter")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -560,7 +661,7 @@ mod _os {
         #[pymethod(name = "__next__")]
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             if self.exhausted.load() {
-                return Err(objiter::new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             match self.entries.write().next() {
@@ -575,7 +676,7 @@ mod _os {
                 },
                 None => {
                     self.exhausted.store(true);
-                    Err(objiter::new_stop_iteration(vm))
+                    Err(vm.new_stop_iteration())
                 }
             }
         }
@@ -596,7 +697,7 @@ mod _os {
         }
 
         #[pymethod(name = "__exit__")]
-        fn exit(zelf: PyRef<Self>, _args: PyFuncArgs) {
+        fn exit(zelf: PyRef<Self>, _args: FuncArgs) {
             zelf.close()
         }
     }
@@ -637,9 +738,7 @@ mod _os {
     #[pyimpl(with(PyStructSequence))]
     impl StatResult {
         pub(super) fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-            self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "stat_result"))
-                .unwrap()
-                .into_object()
+            self.into_struct_sequence(vm).unwrap().into_object()
         }
     }
 
@@ -720,20 +819,13 @@ mod _os {
         Ok(buf)
     }
 
-    // this is basically what CPython has for Py_off_t; windows uses long long
-    // for offsets, other platforms just use off_t
-    #[cfg(not(windows))]
-    pub type Offset = libc::off_t;
-    #[cfg(windows)]
-    pub type Offset = libc::c_longlong;
-
     #[pyfunction]
-    fn isatty(fd: i32) -> bool {
+    pub fn isatty(fd: i32) -> bool {
         unsafe { suppress_iph!(libc::isatty(fd)) != 0 }
     }
 
     #[pyfunction]
-    fn lseek(fd: i32, position: Offset, how: i32, vm: &VirtualMachine) -> PyResult<Offset> {
+    pub fn lseek(fd: i32, position: Offset, how: i32, vm: &VirtualMachine) -> PyResult<Offset> {
         #[cfg(not(windows))]
         let res = unsafe { suppress_iph!(libc::lseek(fd, position, how)) };
         #[cfg(windows)]
@@ -829,6 +921,32 @@ mod _os {
             .into_owned()
     }
 
+    #[pyfunction]
+    pub fn ftruncate(fd: i64, length: Offset, vm: &VirtualMachine) -> PyResult<()> {
+        let f = rust_file(fd);
+        f.set_len(length as u64)
+            .map_err(|e| e.into_pyexception(vm))?;
+        raw_file_number(f);
+        Ok(())
+    }
+
+    #[pyfunction]
+    fn truncate(path: PyObjectRef, length: Offset, vm: &VirtualMachine) -> PyResult<()> {
+        if let Ok(fd) = i64::try_from_object(vm, path.clone()) {
+            return ftruncate(fd, length, vm);
+        }
+        let path = PyPathLike::try_from_object(vm, path)?;
+        // TODO: just call libc::truncate() on POSIX
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|e| e.into_pyexception(vm))?;
+        f.set_len(length as u64)
+            .map_err(|e| e.into_pyexception(vm))?;
+        drop(f);
+        Ok(())
+    }
+
     #[pyattr]
     #[pyclass(module = "os", name = "terminal_size")]
     #[derive(PyStructSequence)]
@@ -890,6 +1008,7 @@ mod _os {
         supports
     }
 }
+pub(crate) use _os::{ftruncate, isatty, lseek};
 
 struct SupportFunc {
     name: &'static str,
@@ -911,7 +1030,12 @@ impl<'a> SupportFunc {
     where
         F: IntoPyNativeFunc<FKind>,
     {
-        let func_obj = vm.ctx.new_function(func);
+        let ctx = &vm.ctx;
+        let func_obj = ctx
+            .new_function_named(func, name.to_owned())
+            .into_function()
+            .with_module(ctx.new_str(MODULE_NAME))
+            .build(ctx);
         Self {
             name,
             func_obj,
@@ -981,8 +1105,8 @@ fn to_seconds_from_unix_epoch(sys_time: SystemTime) -> f64 {
 mod posix {
     use super::*;
 
-    use crate::obj::objdict::PyMapping;
-    use crate::obj::objlist::PyListRef;
+    use crate::builtins::dict::PyMapping;
+    use crate::builtins::list::PyListRef;
     use crate::pyobject::PyIterable;
     use bitflags::bitflags;
     use nix::errno::Errno;
@@ -1030,28 +1154,6 @@ mod posix {
     #[pyattr]
     const EX_CONFIG: i8 = exitcode::CONFIG as i8;
 
-    // cfg taken from nix
-    #[cfg(any(
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        all(
-            target_os = "linux",
-            not(any(target_env = "musl", target_arch = "mips", target_arch = "mips64"))
-        )
-    ))]
-    #[pyattr]
-    const SEEK_DATA: i8 = unistd::Whence::SeekData as i8;
-    #[cfg(any(
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        all(
-            target_os = "linux",
-            not(any(target_env = "musl", target_arch = "mips", target_arch = "mips64"))
-        )
-    ))]
-    #[pyattr]
-    const SEEK_HOLE: i8 = unistd::Whence::SeekHole as i8;
-
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     #[pyattr]
     const POSIX_SPAWN_OPEN: i32 = PosixSpawnFileActionIdentifier::Open as i32;
@@ -1066,7 +1168,7 @@ mod posix {
     #[pyattr]
     const _COPYFILE_DATA: u32 = 1 << 3;
 
-    pub(super) type OpenFlags = i32;
+    pub(crate) type OpenFlags = i32;
 
     // Flags for os_access
     bitflags! {
@@ -1746,9 +1848,7 @@ mod posix {
     #[pyimpl(with(PyStructSequence))]
     impl UnameResult {
         fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-            self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "uname_result"))
-                .unwrap()
-                .into_object()
+            self.into_struct_sequence(vm).unwrap().into_object()
         }
     }
 
@@ -1766,12 +1866,11 @@ mod posix {
     }
 
     #[pyfunction]
-    fn sync(_vm: &VirtualMachine) -> PyResult<()> {
+    fn sync() {
         #[cfg(not(any(target_os = "redox", target_os = "android")))]
         unsafe {
             libc::sync();
         }
-        Ok(())
     }
 
     // cfg from nix
@@ -1957,7 +2056,7 @@ mod posix {
                     let id = PosixSpawnFileActionIdentifier::try_from(id).map_err(|_| {
                         vm.new_type_error("Unknown file_actions identifier".to_owned())
                     })?;
-                    let args = PyFuncArgs::from(args.to_vec());
+                    let args = FuncArgs::from(args.to_vec());
                     let ret = match id {
                         PosixSpawnFileActionIdentifier::Open => {
                             let (fd, path, oflag, mode): (_, PyPathLike, _, _) = args.bind(vm)?;
@@ -2080,27 +2179,27 @@ mod posix {
 
     #[pyfunction(name = "WIFSIGNALED")]
     fn wifsignaled(status: i32) -> bool {
-        unsafe { libc::WIFSIGNALED(status) }
+        libc::WIFSIGNALED(status)
     }
     #[pyfunction(name = "WIFSTOPPED")]
     fn wifstopped(status: i32) -> bool {
-        unsafe { libc::WIFSTOPPED(status) }
+        libc::WIFSTOPPED(status)
     }
     #[pyfunction(name = "WIFEXITED")]
     fn wifexited(status: i32) -> bool {
-        unsafe { libc::WIFEXITED(status) }
+        libc::WIFEXITED(status)
     }
     #[pyfunction(name = "WTERMSIG")]
     fn wtermsig(status: i32) -> i32 {
-        unsafe { libc::WTERMSIG(status) }
+        libc::WTERMSIG(status)
     }
     #[pyfunction(name = "WSTOPSIG")]
     fn wstopsig(status: i32) -> i32 {
-        unsafe { libc::WSTOPSIG(status) }
+        libc::WSTOPSIG(status)
     }
     #[pyfunction(name = "WEXITSTATUS")]
     fn wexitstatus(status: i32) -> i32 {
-        unsafe { libc::WEXITSTATUS(status) }
+        libc::WEXITSTATUS(status)
     }
 
     #[pyfunction]
@@ -2144,8 +2243,7 @@ mod posix {
                 (w.ws_col.into(), w.ws_row.into())
             }
         };
-        super::_os::PyTerminalSize { columns, lines }
-            .into_struct_sequence(vm, vm.try_class(super::MODULE_NAME, "terminal_size")?)
+        super::_os::PyTerminalSize { columns, lines }.into_struct_sequence(vm)
     }
 
     // from libstd:
@@ -2202,7 +2300,7 @@ pub(crate) use posix::raw_set_inheritable;
 #[pymodule]
 mod nt {
     use super::*;
-    use crate::obj::objlist::PyListRef;
+    use crate::builtins::list::PyListRef;
     pub(super) use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::RawHandle;
     #[cfg(target_env = "msvc")]
@@ -2211,7 +2309,7 @@ mod nt {
     #[pyattr]
     use libc::O_BINARY;
 
-    pub(super) type OpenFlags = u32;
+    pub(crate) type OpenFlags = u32;
 
     pub fn raw_file_number(handle: File) -> i64 {
         use std::os::windows::io::IntoRawHandle;
@@ -2467,8 +2565,7 @@ mod nt {
                 )
             }
         };
-        super::_os::PyTerminalSize { columns, lines }
-            .into_struct_sequence(vm, vm.try_class(super::MODULE_NAME, "terminal_size")?)
+        super::_os::PyTerminalSize { columns, lines }.into_struct_sequence(vm)
     }
 
     #[cfg(target_env = "msvc")]
@@ -2565,7 +2662,7 @@ mod minor {
     use super::*;
 
     #[cfg(target_os = "wasi")]
-    pub(super) type OpenFlags = u16;
+    pub(crate) type OpenFlags = u16;
 
     #[cfg(target_os = "wasi")]
     pub(crate) fn raw_file_number(handle: File) -> i64 {
@@ -2626,4 +2723,4 @@ mod minor {
 #[cfg(not(any(unix, windows)))]
 use minor as platform;
 
-pub(crate) use platform::{raw_file_number, rust_file, MODULE_NAME};
+pub(crate) use platform::{raw_file_number, rust_file, OpenFlags, MODULE_NAME};

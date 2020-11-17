@@ -416,6 +416,8 @@ class ComplexTest(unittest.TestCase):
             self.assertEqual(complex(complex1(1j)), 2j)
         self.assertRaises(TypeError, complex, complex2(1j))
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @support.requires_IEEE_754
     def test_constructor_special_numbers(self):
         class complex2(complex):
@@ -459,8 +461,6 @@ class ComplexTest(unittest.TestCase):
             x /= 3.0    # now check against floating point
             self.assertEqual(hash(x), hash(complex(x, 0.)))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_abs(self):
         nums = [complex(x/3., y/7.) for x in range(-9,9) for y in range(-9,9)]
         for num in nums:
@@ -495,6 +495,8 @@ class ComplexTest(unittest.TestCase):
         self.assertEqual(-6j,complex(repr(-6j)))
         self.assertEqual(6j,complex(repr(6j)))
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @support.requires_IEEE_754
     def test_negative_zero_repr_str(self):
         def test(v, expected, test_fn=self.assertEqual):
@@ -567,6 +569,8 @@ class ComplexTest(unittest.TestCase):
         self.assertEqual(complex("-1e500j"), complex(0.0, -INF))
         self.assertEqual(complex("-1e500+1.8e308j"), complex(-INF, INF))
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @support.requires_IEEE_754
     def test_repr_roundtrip(self):
         vals = [0.0, 1e-500, 1e-315, 1e-200, 0.0123, 3.1415, 1e50, INF, NAN]

@@ -5,14 +5,14 @@ extern crate env_logger;
 extern crate log;
 
 use clap::{App, AppSettings, Arg, ArgMatches};
-use rustpython_compiler::compile;
 use rustpython_vm::{
+    builtins::PyInt,
+    compile,
     exceptions::print_exception,
     match_class,
-    obj::{objint::PyInt, objtype},
-    pyobject::{BorrowValue, ItemProtocol, PyResult},
+    pyobject::{BorrowValue, ItemProtocol, PyResult, TypeProtocol},
     scope::Scope,
-    util, InitParameter, Interpreter, PySettings, VirtualMachine,
+    sysmodule, util, InitParameter, Interpreter, PySettings, VirtualMachine,
 };
 
 use std::convert::TryInto;
@@ -56,6 +56,8 @@ fn main() {
     let exitcode = interp.enter(move |vm| {
         let res = run_rustpython(vm, &matches);
 
+        flush_std(vm);
+
         #[cfg(feature = "flame-it")]
         {
             main_guard.end();
@@ -67,7 +69,7 @@ fn main() {
         // See if any exception leaked out:
         let exitcode = match res {
             Ok(()) => 0,
-            Err(err) if objtype::isinstance(&err, &vm.ctx.exceptions.system_exit) => {
+            Err(err) if err.isinstance(&vm.ctx.exceptions.system_exit) => {
                 let args = err.args();
                 match args.borrow_value().len() {
                     0 => 0,
@@ -103,10 +105,21 @@ fn main() {
 
         let _ = vm.run_atexit_funcs();
 
+        flush_std(vm);
+
         exitcode
     });
 
     process::exit(exitcode);
+}
+
+fn flush_std(vm: &VirtualMachine) {
+    if let Ok(stdout) = sysmodule::get_stdout(vm) {
+        let _ = vm.call_method(&stdout, "flush", ());
+    }
+    if let Ok(stderr) = sysmodule::get_stderr(vm) {
+        let _ = vm.call_method(&stderr, "flush", ());
+    }
 }
 
 fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
@@ -496,7 +509,7 @@ fn run_module(vm: &VirtualMachine, module: &str) -> PyResult<()> {
     debug!("Running module {}", module);
     let runpy = vm.import("runpy", &[], 0)?;
     let run_module_as_main = vm.get_attribute(runpy, "_run_module_as_main")?;
-    vm.invoke(&run_module_as_main, vec![vm.ctx.new_str(module)])?;
+    vm.invoke(&run_module_as_main, (module,))?;
     Ok(())
 }
 
@@ -527,11 +540,7 @@ fn run_script(vm: &VirtualMachine, scope: Scope, script_file: &str) -> PyResult<
 
     let dir = file_path.parent().unwrap().to_str().unwrap().to_owned();
     let sys_path = vm.get_attribute(vm.sys_module.clone(), "path").unwrap();
-    vm.call_method(
-        &sys_path,
-        "insert",
-        vec![vm.ctx.new_int(0), vm.ctx.new_str(dir)],
-    )?;
+    vm.call_method(&sys_path, "insert", (0, dir))?;
 
     match util::read_file(&file_path) {
         Ok(source) => {

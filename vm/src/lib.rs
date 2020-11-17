@@ -44,7 +44,7 @@ pub use rustpython_derive::*;
 pub mod macros;
 
 mod anystr;
-mod builtins;
+pub mod builtins;
 mod bytesinner;
 pub mod byteslike;
 pub mod cformat;
@@ -58,7 +58,7 @@ pub mod frame;
 mod frozen;
 pub mod function;
 pub mod import;
-pub mod obj;
+mod iterator;
 mod py_io;
 pub mod py_serde;
 pub mod pyobject;
@@ -69,7 +69,7 @@ mod sequence;
 mod sliceable;
 pub mod slots;
 pub mod stdlib;
-mod sysmodule;
+pub mod sysmodule;
 pub mod types;
 pub mod util;
 mod version;
@@ -79,6 +79,8 @@ mod vm;
 pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
 pub use rustpython_bytecode::*;
 pub use rustpython_common as common;
+#[cfg(feature = "rustpython-compiler")]
+pub use rustpython_compiler as compile;
 
 #[doc(hidden)]
 pub mod __exports {

@@ -2,16 +2,15 @@ use csv as rust_csv;
 use itertools::{self, Itertools};
 use std::fmt::{self, Debug, Formatter};
 
+use crate::builtins::pystr::{self, PyStr};
+use crate::builtins::pytype::PyTypeRef;
 use crate::common::lock::PyRwLock;
-use crate::function::PyFuncArgs;
-use crate::obj::objiter;
-use crate::obj::objstr::{self, PyStr};
-use crate::obj::objtype::PyTypeRef;
+use crate::function::FuncArgs;
 use crate::pyobject::{
     BorrowValue, IntoPyObject, PyClassImpl, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
+    StaticType, TryFromObject, TypeProtocol,
 };
-use crate::types::create_type;
+use crate::types::create_simple_type;
 use crate::VirtualMachine;
 
 #[repr(i32)]
@@ -28,9 +27,9 @@ struct ReaderOption {
 }
 
 impl ReaderOption {
-    fn new(args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<Self> {
+    fn new(args: FuncArgs, vm: &VirtualMachine) -> PyResult<Self> {
         let delimiter = if let Some(delimiter) = args.get_optional_kwarg("delimiter") {
-            *objstr::borrow_value(&delimiter)
+            *pystr::borrow_value(&delimiter)
                 .as_bytes()
                 .iter()
                 .exactly_one()
@@ -43,7 +42,7 @@ impl ReaderOption {
         };
 
         let quotechar = if let Some(quotechar) = args.get_optional_kwarg("quotechar") {
-            *objstr::borrow_value(&quotechar)
+            *pystr::borrow_value(&quotechar)
                 .as_bytes()
                 .iter()
                 .exactly_one()
@@ -64,7 +63,7 @@ impl ReaderOption {
 
 pub fn build_reader(
     iterable: PyIterable<PyObjectRef>,
-    args: PyFuncArgs,
+    args: FuncArgs,
     vm: &VirtualMachine,
 ) -> PyResult {
     let config = ReaderOption::new(args, vm)?;
@@ -81,7 +80,7 @@ fn into_strings(iterable: &PyIterable<PyObjectRef>, vm: &VirtualMachine) -> PyRe
                 obj => {
                     let msg = format!(
             "iterator should return strings, not {} (did you open the file in text mode?)",
-            obj.lease_class().name
+            obj.class().name
           );
                     Err(vm.new_type_error(msg))
                 }
@@ -136,8 +135,8 @@ impl Debug for Reader {
 }
 
 impl PyValue for Reader {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_csv", "Reader")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -178,7 +177,7 @@ impl Reader {
                     }
                 }
             } else {
-                Err(objiter::new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             }
         } else {
             unreachable!()
@@ -186,7 +185,7 @@ impl Reader {
     }
 }
 
-fn _csv_reader(fp: PyObjectRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+fn _csv_reader(fp: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
     if let Ok(iterable) = PyIterable::<PyObjectRef>::try_from_object(vm, fp) {
         build_reader(iterable, args, vm)
     } else {
@@ -199,11 +198,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     let reader_type = Reader::make_class(ctx);
 
-    let error = create_type(
-        "Error",
-        &ctx.types.type_type,
-        ctx.exceptions.exception_type.clone(),
-    );
+    let error = create_simple_type("Error", &ctx.exceptions.exception_type);
 
     py_module!(vm, "_csv", {
         "reader" => named_function!(ctx, _csv, reader),

@@ -13,40 +13,32 @@ use arr_macro::arr;
 use crossbeam_utils::atomic::AtomicCell;
 use num_traits::{Signed, ToPrimitive};
 
-use crate::builtins::{self, to_ascii};
-use crate::bytecode;
+use crate::builtins::code::{self, PyCode, PyCodeRef};
+use crate::builtins::dict::PyDictRef;
+use crate::builtins::int::{PyInt, PyIntRef};
+use crate::builtins::list::PyList;
+use crate::builtins::module::{self, PyModule};
+use crate::builtins::object;
+use crate::builtins::pybool;
+use crate::builtins::pystr::{PyStr, PyStrRef};
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::tuple::PyTuple;
 use crate::common::{hash::HashSecret, lock::PyMutex, rc::PyRc};
+#[cfg(feature = "rustpython-compiler")]
+use crate::compile::{self, CompileError, CompileErrorType, CompileOpts};
 use crate::exceptions::{self, PyBaseException, PyBaseExceptionRef};
 use crate::frame::{ExecutionResult, Frame, FrameRef};
-use crate::frozen;
-use crate::function::PyFuncArgs;
-use crate::import;
-use crate::obj::objbool;
-use crate::obj::objcode::{PyCode, PyCodeRef};
-use crate::obj::objdict::PyDictRef;
-use crate::obj::objint::{PyInt, PyIntRef};
-use crate::obj::objiter;
-use crate::obj::objlist::PyList;
-use crate::obj::objmodule::{self, PyModule};
-use crate::obj::objobject;
-use crate::obj::objstr::{PyStr, PyStrRef};
-use crate::obj::objtuple::PyTuple;
-use crate::obj::objtype::{self, PyTypeRef};
+use crate::function::{FuncArgs, IntoFuncArgs};
 use crate::pyobject::{
     BorrowValue, Either, IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue, PyContext,
-    PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TryIntoRef, TypeProtocol,
+    PyObject, PyObjectRef, PyRef, PyRefExact, PyResult, PyValue, TryFromObject, TryIntoRef,
+    TypeProtocol,
 };
 use crate::scope::Scope;
 use crate::slots::PyComparisonOp;
-use crate::stdlib;
-use crate::sysmodule;
-#[cfg(feature = "rustpython-compiler")]
-use rustpython_compiler::{
-    compile::{self, CompileOpts},
-    error::CompileError,
-};
+use crate::{builtins, bytecode, frozen, import, iterator, stdlib, sysmodule};
 
-// use objects::objects;
+// use objects::ects;
 
 // Objects are live when they are on stack, or referenced by a name (for now)
 
@@ -71,7 +63,7 @@ pub struct VirtualMachine {
 }
 
 pub(crate) mod thread {
-    use super::{PyObjectRef, VirtualMachine};
+    use super::{PyObjectRef, TypeProtocol, VirtualMachine};
     use itertools::Itertools;
     use std::cell::RefCell;
     use std::ptr::NonNull;
@@ -97,7 +89,7 @@ pub(crate) mod thread {
         let vm_owns_obj = |intp: NonNull<VirtualMachine>| {
             // SAFETY: all references in VM_STACK should be valid
             let vm = unsafe { intp.as_ref() };
-            crate::obj::objtype::isinstance(obj, &vm.ctx.types.object_type)
+            obj.isinstance(&vm.ctx.types.object_type)
         };
         VM_STACK.with(|vms| {
             let intp = match vms.borrow().iter().copied().exactly_one() {
@@ -120,11 +112,11 @@ pub(crate) mod thread {
 pub struct PyGlobalState {
     pub settings: PySettings,
     pub stdlib_inits: HashMap<String, stdlib::StdlibInitFunc>,
-    pub frozen: HashMap<String, bytecode::FrozenModule>,
+    pub frozen: HashMap<String, code::FrozenModule>,
     pub stacksize: AtomicCell<usize>,
     pub thread_count: AtomicCell<usize>,
     pub hash_secret: HashSecret,
-    pub atexit_funcs: PyMutex<Vec<(PyObjectRef, PyFuncArgs)>>,
+    pub atexit_funcs: PyMutex<Vec<(PyObjectRef, FuncArgs)>>,
 }
 
 pub const NSIG: usize = 64;
@@ -257,14 +249,13 @@ impl VirtualMachine {
         let signal_handlers = RefCell::new(arr![ctx.none(); 64]);
 
         let stdlib_inits = stdlib::get_module_inits();
-        let frozen = frozen::get_module_inits();
 
         let hash_secret = match settings.hash_seed {
             Some(seed) => HashSecret::new(seed),
             None => rand::random(),
         };
 
-        let vm = VirtualMachine {
+        let mut vm = VirtualMachine {
             builtins,
             sys_module: sysmod,
             ctx: PyRc::new(ctx),
@@ -281,7 +272,7 @@ impl VirtualMachine {
             state: PyRc::new(PyGlobalState {
                 settings,
                 stdlib_inits,
-                frozen,
+                frozen: HashMap::new(),
                 stacksize: AtomicCell::new(0),
                 thread_count: AtomicCell::new(0),
                 hash_secret,
@@ -290,13 +281,16 @@ impl VirtualMachine {
             initialized: false,
         };
 
-        objmodule::init_module_dict(
+        let frozen = frozen::get_module_inits(&vm);
+        PyRc::get_mut(&mut vm.state).unwrap().frozen = frozen;
+
+        module::init_module_dict(
             &vm,
             &builtins_dict,
             vm.ctx.new_str("builtins"),
             vm.ctx.none(),
         );
-        objmodule::init_module_dict(&vm, &sysmod_dict, vm.ctx.new_str("sys"), vm.ctx.none());
+        module::init_module_dict(&vm, &sysmod_dict, vm.ctx.new_str("sys"), vm.ctx.none());
         vm
     }
 
@@ -320,10 +314,13 @@ impl VirtualMachine {
                 // builtins.open to io.OpenWrapper, but this is easier, since it doesn't
                 // require the Python stdlib to be present
                 let io = import::import_builtin(self, "_io")?;
-                let io_open = self.get_attribute(io, "open")?;
                 let set_stdio = |name, fd, mode: &str| {
-                    let stdio =
-                        self.invoke(&io_open, vec![self.ctx.new_int(fd), self.new_pyobj(mode)])?;
+                    let stdio = crate::stdlib::io::open(
+                        self.ctx.new_int(fd),
+                        Some(mode),
+                        Default::default(),
+                        self,
+                    )?;
                     self.set_attr(
                         &self.sys_module,
                         format!("__{}__", name), // e.g. __stdin__
@@ -336,6 +333,7 @@ impl VirtualMachine {
                 set_stdio("stdout", 1, "w")?;
                 set_stdio("stderr", 2, "w")?;
 
+                let io_open = self.get_attribute(io, "open")?;
                 self.set_attr(&self.builtins, "open", io_open)?;
             }
 
@@ -349,6 +347,24 @@ impl VirtualMachine {
         self.expect_pyresult(res, "initializiation failed");
 
         self.initialized = true;
+    }
+
+    /// Can only be used in the initialization closure passed to [`Interpreter::new_with_init`]
+    pub fn add_native_module(&mut self, name: String, module: stdlib::StdlibInitFunc) {
+        let state = PyRc::get_mut(&mut self.state)
+            .expect("can't add_native_module when there are multiple threads");
+        state.stdlib_inits.insert(name, module);
+    }
+
+    /// Can only be used in the initialization closure passed to [`Interpreter::new_with_init`]
+    pub fn add_frozen<I>(&mut self, frozen: I)
+    where
+        I: IntoIterator<Item = (String, bytecode::FrozenModule)>,
+    {
+        let frozen = frozen::map_frozen(self, frozen).collect::<Vec<_>>();
+        let state = PyRc::get_mut(&mut self.state)
+            .expect("can't add_frozen when there are multiple threads");
+        state.frozen.extend(frozen);
     }
 
     /// Start a new thread with access to the same interpreter.
@@ -419,7 +435,7 @@ impl VirtualMachine {
         for (func, args) in self.state.atexit_funcs.lock().drain(..).rev() {
             if let Err(e) = self.invoke(&func, args) {
                 last_exc = Some(e.clone());
-                if !objtype::isinstance(&e, &self.ctx.exceptions.system_exit) {
+                if !e.isinstance(&self.ctx.exceptions.system_exit) {
                     writeln!(sysmodule::PyStderr(self), "Error in atexit._run_exitfuncs:");
                     exceptions::print_exception(self, e);
                 }
@@ -509,8 +525,12 @@ impl VirtualMachine {
         value.into_pyobject(self)
     }
 
+    pub fn new_code_object(&self, code: impl code::IntoCodeObject) -> PyCodeRef {
+        self.ctx.new_code_object(code.into_codeobj(self))
+    }
+
     pub fn new_module(&self, name: &str, dict: PyDictRef) -> PyObjectRef {
-        objmodule::init_module_dict(
+        module::init_module_dict(
             self,
             &dict,
             self.new_pyobj(name.to_owned()),
@@ -588,8 +608,8 @@ impl VirtualMachine {
         self.new_type_error(format!(
             "Unsupported operand types for '{}': '{}' and '{}'",
             op,
-            a.lease_class().name,
-            b.lease_class().name
+            a.class().name,
+            b.class().name
         ))
     }
 
@@ -613,6 +633,11 @@ impl VirtualMachine {
     pub fn new_value_error(&self, msg: String) -> PyBaseExceptionRef {
         let value_error = self.ctx.exceptions.value_error.clone();
         self.new_exception_msg(value_error, msg)
+    }
+
+    pub fn new_buffer_error(&self, msg: String) -> PyBaseExceptionRef {
+        let buffer_error = self.ctx.exceptions.buffer_error.clone();
+        self.new_exception_msg(buffer_error, msg)
     }
 
     pub fn new_key_error(&self, obj: PyObjectRef) -> PyBaseExceptionRef {
@@ -647,12 +672,12 @@ impl VirtualMachine {
 
     #[cfg(feature = "rustpython-compiler")]
     pub fn new_syntax_error(&self, error: &CompileError) -> PyBaseExceptionRef {
-        let syntax_error_type = if error.is_indentation_error() {
-            self.ctx.exceptions.indentation_error.clone()
-        } else if error.is_tab_error() {
-            self.ctx.exceptions.tab_error.clone()
-        } else {
-            self.ctx.exceptions.syntax_error.clone()
+        let syntax_error_type = match &error.error {
+            CompileErrorType::Parse(p) if p.is_indentation_error() => {
+                self.ctx.exceptions.indentation_error.clone()
+            }
+            CompileErrorType::Parse(p) if p.is_tab_error() => self.ctx.exceptions.tab_error.clone(),
+            _ => self.ctx.exceptions.syntax_error.clone(),
         };
         let syntax_error = self.new_exception_msg(syntax_error_type, error.to_string());
         let lineno = self.ctx.new_int(error.location.row());
@@ -661,10 +686,12 @@ impl VirtualMachine {
             .unwrap();
         self.set_attr(syntax_error.as_object(), "offset", offset)
             .unwrap();
-        if let Some(v) = error.statement.as_ref() {
-            self.set_attr(syntax_error.as_object(), "text", self.new_pyobj(v))
-                .unwrap();
-        }
+        self.set_attr(
+            syntax_error.as_object(),
+            "text",
+            error.statement.clone().into_pyobject(self),
+        )
+        .unwrap();
         self.set_attr(
             syntax_error.as_object(),
             "filename",
@@ -674,10 +701,14 @@ impl VirtualMachine {
         syntax_error
     }
 
-    pub fn new_import_error(&self, msg: String, name: &str) -> PyBaseExceptionRef {
+    pub fn new_import_error(
+        &self,
+        msg: String,
+        name: impl TryIntoRef<PyStr>,
+    ) -> PyBaseExceptionRef {
         let import_error = self.ctx.exceptions.import_error.clone();
         let exc = self.new_exception_msg(import_error, msg);
-        self.set_attr(exc.as_object(), "name", self.new_pyobj(name))
+        self.set_attr(exc.as_object(), "name", name.try_into_ref(self).unwrap())
             .unwrap();
         exc
     }
@@ -685,6 +716,11 @@ impl VirtualMachine {
     pub fn new_runtime_error(&self, msg: String) -> PyBaseExceptionRef {
         let runtime_error = self.ctx.exceptions.runtime_error.clone();
         self.new_exception_msg(runtime_error, msg)
+    }
+
+    pub fn new_stop_iteration(&self) -> PyBaseExceptionRef {
+        let stop_iteration_type = self.ctx.exceptions.stop_iteration.clone();
+        self.new_exception_empty(stop_iteration_type)
     }
 
     // TODO: #[track_caller] when stabilized
@@ -748,10 +784,10 @@ impl VirtualMachine {
 
     // Container of the virtual machine state:
     pub fn to_str(&self, obj: &PyObjectRef) -> PyResult<PyStrRef> {
-        if obj.lease_class().is(&self.ctx.types.str_type) {
+        if obj.class().is(&self.ctx.types.str_type) {
             Ok(obj.clone().downcast().unwrap())
         } else {
-            let s = self.call_method(&obj, "__str__", vec![])?;
+            let s = self.call_method(&obj, "__str__", ())?;
             PyStrRef::try_from_object(self, s)
         }
     }
@@ -762,39 +798,34 @@ impl VirtualMachine {
     }
 
     pub fn to_repr(&self, obj: &PyObjectRef) -> PyResult<PyStrRef> {
-        let repr = self.call_method(obj, "__repr__", vec![])?;
+        let repr = self.call_method(obj, "__repr__", ())?;
         TryFromObject::try_from_object(self, repr)
     }
 
-    pub fn to_ascii(&self, obj: &PyObjectRef) -> PyResult {
-        let repr = self.call_method(obj, "__repr__", vec![])?;
-        let repr: PyStrRef = TryFromObject::try_from_object(self, repr)?;
-        let ascii = to_ascii(repr.borrow_value());
-        Ok(self.ctx.new_str(ascii))
-    }
-
-    pub fn to_index(&self, obj: &PyObjectRef) -> Option<PyResult<PyIntRef>> {
-        Some(
-            if let Ok(val) = TryFromObject::try_from_object(self, obj.clone()) {
-                Ok(val)
-            } else if obj.lease_class().has_attr("__index__") {
-                self.call_method(obj, "__index__", vec![]).and_then(|r| {
-                    if let Ok(val) = TryFromObject::try_from_object(self, r) {
-                        Ok(val)
-                    } else {
-                        Err(self.new_type_error(format!(
-                            "__index__ returned non-int (type {})",
-                            obj.lease_class().name
-                        )))
-                    }
+    pub fn to_index_opt(&self, obj: PyObjectRef) -> Option<PyResult<PyIntRef>> {
+        match obj.downcast() {
+            Ok(val) => Some(Ok(val)),
+            Err(obj) => self.get_method(obj, "__index__").map(|index| {
+                // TODO: returning strict subclasses of int in __index__ is deprecated
+                self.invoke(&index?, ())?.downcast().map_err(|bad| {
+                    self.new_type_error(format!(
+                        "__index__ returned non-int (type {})",
+                        bad.class().name
+                    ))
                 })
-            } else {
-                return None;
-            },
-        )
+            }),
+        }
+    }
+    pub fn to_index(&self, obj: &PyObjectRef) -> PyResult<PyIntRef> {
+        self.to_index_opt(obj.clone()).unwrap_or_else(|| {
+            Err(self.new_type_error(format!(
+                "'{}' object cannot be interpreted as an integer",
+                obj.class().name
+            )))
+        })
     }
 
-    pub fn import(&self, module: &str, from_list: &[String], level: usize) -> PyResult {
+    pub fn import(&self, module: &str, from_list: &[PyStrRef], level: usize) -> PyResult {
         // if the import inputs seem weird, e.g a package import or something, rather than just
         // a straight `import ident`
         let weird = module.contains('.') || level != 0 || !from_list.is_empty();
@@ -834,18 +865,9 @@ impl VirtualMachine {
                 };
                 let from_list = self
                     .ctx
-                    .new_tuple(from_list.iter().map(|name| self.new_pyobj(name)).collect());
-                self.invoke(
-                    &import_func,
-                    vec![
-                        self.new_pyobj(module),
-                        globals,
-                        locals,
-                        from_list,
-                        self.ctx.new_int(level),
-                    ],
-                )
-                .map_err(|exc| import::remove_importlib_frames(self, &exc))
+                    .new_tuple(from_list.iter().map(|x| x.as_object().clone()).collect());
+                self.invoke(&import_func, (module, globals, locals, from_list, level))
+                    .map_err(|exc| import::remove_importlib_frames(self, &exc))
             }
         }
     }
@@ -855,23 +877,19 @@ impl VirtualMachine {
     pub fn isinstance(&self, obj: &PyObjectRef, cls: &PyTypeRef) -> PyResult<bool> {
         // cpython first does an exact check on the type, although documentation doesn't state that
         // https://github.com/python/cpython/blob/a24107b04c1277e3c1105f98aff5bfa3a98b33a0/Objects/abstract.c#L2408
-        if obj.lease_class().is(cls) {
+        if obj.class().is(cls) {
             Ok(true)
         } else {
-            let ret = self.call_method(cls.as_object(), "__instancecheck__", vec![obj.clone()])?;
-            objbool::boolval(self, ret)
+            let ret = self.call_method(cls.as_object(), "__instancecheck__", (obj.clone(),))?;
+            pybool::boolval(self, ret)
         }
     }
 
     /// Determines if `subclass` is a subclass of `cls`, either directly, indirectly or virtually
     /// via the __subclasscheck__ magic method.
     pub fn issubclass(&self, subclass: &PyTypeRef, cls: &PyTypeRef) -> PyResult<bool> {
-        let ret = self.call_method(
-            cls.as_object(),
-            "__subclasscheck__",
-            vec![subclass.clone().into_object()],
-        )?;
-        objbool::boolval(self, ret)
+        let ret = self.call_method(cls.as_object(), "__subclasscheck__", (subclass.clone(),))?;
+        pybool::boolval(self, ret)
     }
 
     pub fn call_get_descriptor_specific(
@@ -880,14 +898,12 @@ impl VirtualMachine {
         obj: Option<PyObjectRef>,
         cls: Option<PyObjectRef>,
     ) -> Option<PyResult> {
-        descr
-            .class()
-            .first_in_mro(|cls| cls.slots.descr_get.load())
-            .map(|descr_get| descr_get(descr, obj, cls, self))
+        let descr_get = descr.class().mro_find_map(|cls| cls.slots.descr_get.load());
+        descr_get.map(|descr_get| descr_get(descr, obj, cls, self))
     }
 
     pub fn call_get_descriptor(&self, descr: PyObjectRef, obj: PyObjectRef) -> Option<PyResult> {
-        let cls = obj.class().into_object();
+        let cls = obj.clone_class().into_object();
         self.call_get_descriptor_specific(descr, Some(obj), Some(cls))
     }
 
@@ -898,7 +914,7 @@ impl VirtualMachine {
 
     pub fn call_method<T>(&self, obj: &PyObjectRef, method_name: &str, args: T) -> PyResult
     where
-        T: Into<PyFuncArgs>,
+        T: IntoFuncArgs,
     {
         flame_guard!(format!("call_method({:?})", method_name));
 
@@ -913,9 +929,9 @@ impl VirtualMachine {
         }
     }
 
-    fn _invoke(&self, callable: &PyObjectRef, args: PyFuncArgs) -> PyResult {
+    fn _invoke(&self, callable: &PyObjectRef, args: FuncArgs) -> PyResult {
         vm_trace!("Invoke: {:?} {:?}", callable, args);
-        let slot_call = callable.class().first_in_mro(|cls| cls.slots.call.load());
+        let slot_call = callable.class().mro_find_map(|cls| cls.slots.call.load());
         match slot_call {
             Some(slot_call) => {
                 self.trace_event(TraceEvent::Call)?;
@@ -925,7 +941,7 @@ impl VirtualMachine {
             }
             None => Err(self.new_type_error(format!(
                 "'{}' object is not callable",
-                callable.lease_class().name
+                callable.class().name
             ))),
         }
     }
@@ -933,9 +949,9 @@ impl VirtualMachine {
     #[inline]
     pub fn invoke<T>(&self, func_ref: &PyObjectRef, args: T) -> PyResult
     where
-        T: Into<PyFuncArgs>,
+        T: IntoFuncArgs,
     {
-        self._invoke(func_ref, args.into())
+        self._invoke(func_ref, args.into_args(self))
     }
 
     /// Call registered trace function.
@@ -977,7 +993,7 @@ impl VirtualMachine {
 
     pub fn extract_elements<T: TryFromObject>(&self, value: &PyObjectRef) -> PyResult<Vec<T>> {
         // Extract elements from item, if possible:
-        let cls = value.lease_class();
+        let cls = value.class();
         if cls.is(&self.ctx.types.tuple_type) {
             value
                 .payload::<PyTuple>()
@@ -995,9 +1011,48 @@ impl VirtualMachine {
                 .map(|obj| T::try_from_object(self, obj.clone()))
                 .collect()
         } else {
-            let iter = objiter::get_iter(self, value)?;
-            objiter::get_all(self, &iter)
+            let iter = iterator::get_iter(self, value)?;
+            iterator::get_all(self, &iter)
         }
+    }
+
+    pub fn map_iterable_object<F, R>(
+        &self,
+        obj: &PyObjectRef,
+        mut f: F,
+    ) -> PyResult<PyResult<Vec<R>>>
+    where
+        F: FnMut(PyObjectRef) -> PyResult<R>,
+    {
+        match_class!(match obj {
+            ref l @ PyList => {
+                let mut i: usize = 0;
+                let mut results = Vec::with_capacity(l.borrow_value().len());
+                loop {
+                    let elem = {
+                        let elements = &*l.borrow_value();
+                        if i >= elements.len() {
+                            results.shrink_to_fit();
+                            return Ok(Ok(results));
+                        } else {
+                            elements[i].clone()
+                        }
+                        // free the lock
+                    };
+                    match f(elem) {
+                        Ok(result) => results.push(result),
+                        Err(err) => return Ok(Err(err)),
+                    }
+                    i += 1;
+                }
+            }
+            ref t @ PyTuple => Ok(t.borrow_value().iter().cloned().map(f).collect()),
+            // TODO: put internal iterable type
+            obj => {
+                let iter = iterator::get_iter(self, obj)?;
+                Ok(iterator::try_map(self, &iter, f))
+            }
+        })
     }
 
     // get_attribute should be used for full attribute access (usually from user code).
@@ -1010,7 +1065,7 @@ impl VirtualMachine {
         vm_trace!("vm.__getattribute__: {:?} {:?}", obj, attr_name);
         let getattro = obj
             .class()
-            .first_in_mro(|cls| cls.slots.getattro.load())
+            .mro_find_map(|cls| cls.slots.getattro.load())
             .unwrap();
         getattro(obj, attr_name, self)
     }
@@ -1021,15 +1076,11 @@ impl VirtualMachine {
         V: Into<PyObjectRef>,
     {
         let attr_name = attr_name.try_into_ref(self)?;
-        self.call_method(
-            obj,
-            "__setattr__",
-            vec![attr_name.into_object(), attr_value.into()],
-        )
+        self.call_method(obj, "__setattr__", (attr_name, attr_value.into()))
     }
 
     pub fn del_attr(&self, obj: &PyObjectRef, attr_name: PyObjectRef) -> PyResult<()> {
-        self.call_method(&obj, "__delattr__", vec![attr_name])?;
+        self.call_method(&obj, "__delattr__", (attr_name,))?;
         Ok(())
     }
 
@@ -1072,7 +1123,7 @@ impl VirtualMachine {
     {
         if let Some(method_or_err) = self.get_method(obj.clone(), method) {
             let method = method_or_err?;
-            let result = self.invoke(&method, vec![arg.clone()])?;
+            let result = self.invoke(&method, (arg.clone(),))?;
             if let PyArithmaticValue::Implemented(x) = PyArithmaticValue::from_object(self, result)
             {
                 return Ok(x);
@@ -1122,10 +1173,10 @@ impl VirtualMachine {
         dict: Option<PyDictRef>,
     ) -> PyResult<Option<PyObjectRef>> {
         let name = name_str.borrow_value();
-        let cls_attr = obj.lease_class().get_attr(name);
+        let cls_attr = obj.class().get_attr(name);
 
         if let Some(ref attr) = cls_attr {
-            if attr.lease_class().has_attr("__set__") {
+            if attr.class().has_attr("__set__") {
                 if let Some(r) = self.call_get_descriptor(attr.clone(), obj.clone()) {
                     return r.map(Some);
                 }
@@ -1144,9 +1195,8 @@ impl VirtualMachine {
             Ok(Some(obj_attr))
         } else if let Some(attr) = cls_attr {
             self.call_if_get_descriptor(attr, obj).map(Some)
-        } else if let Some(getter) = obj.class().get_attr("__getattr__") {
-            self.invoke(&getter, vec![obj, name_str.into_object()])
-                .map(Some)
+        } else if let Some(getter) = obj.clone_class().get_attr("__getattr__") {
+            self.invoke(&getter, (obj, name_str)).map(Some)
         } else {
             Ok(None)
         }
@@ -1154,7 +1204,7 @@ impl VirtualMachine {
 
     pub fn is_callable(&self, obj: &PyObjectRef) -> bool {
         obj.class()
-            .first_in_mro(|cls| cls.slots.call.load())
+            .mro_find_map(|cls| cls.slots.call.load())
             .is_some()
     }
 
@@ -1200,11 +1250,7 @@ impl VirtualMachine {
         opts: CompileOpts,
     ) -> Result<PyCodeRef, CompileError> {
         compile::compile(source, mode, source_path, opts)
-            .map(|codeobj| PyCode::new(codeobj).into_ref(self))
-            .map_err(|mut compile_error| {
-                compile_error.update_statement_info(source.trim_end().to_owned());
-                compile_error
-            })
+            .map(|code| PyCode::new(self.map_codeobj(code)).into_ref(self))
     }
 
     fn call_codec_func(
@@ -1438,7 +1484,7 @@ impl VirtualMachine {
         let call_cmp = |obj: &PyObjectRef, other, op| {
             let cmp = obj
                 .class()
-                .first_in_mro(|cls| cls.slots.cmp.load())
+                .mro_find_map(|cls| cls.slots.cmp.load())
                 .unwrap();
             Ok(match cmp(obj, other, op, self)? {
                 Either::A(obj) => PyArithmaticValue::from_object(self, obj).map(Either::A),
@@ -1448,9 +1494,9 @@ impl VirtualMachine {
 
         let mut checked_reverse_op = false;
         let is_strict_subclass = {
-            let v_class = v.lease_class();
-            let w_class = w.lease_class();
-            !v_class.is(&w_class) && objtype::issubclass(&w_class, &v_class)
+            let v_class = v.class();
+            let w_class = w.class();
+            !v_class.is(&w_class) && w_class.issubclass(&v_class)
         };
         if is_strict_subclass {
             let res = call_cmp(w, v, swapped)?;
@@ -1478,7 +1524,7 @@ impl VirtualMachine {
 
     pub fn bool_cmp(&self, a: &PyObjectRef, b: &PyObjectRef, op: PyComparisonOp) -> PyResult<bool> {
         match self._cmp(a, b, op)? {
-            Either::A(obj) => objbool::boolval(self, obj),
+            Either::A(obj) => pybool::boolval(self, obj),
             Either::B(b) => Ok(b),
         }
     }
@@ -1490,20 +1536,20 @@ impl VirtualMachine {
     pub fn _hash(&self, obj: &PyObjectRef) -> PyResult<rustpython_common::hash::PyHash> {
         let hash = obj
             .class()
-            .first_in_mro(|cls| cls.slots.hash.load())
+            .mro_find_map(|cls| cls.slots.hash.load())
             .unwrap(); // hash always exist
         hash(&obj, self)
     }
 
-    pub fn _len(&self, obj: &PyObjectRef) -> Option<PyResult<usize>> {
+    pub fn obj_len_opt(&self, obj: &PyObjectRef) -> Option<PyResult<usize>> {
         self.get_method(obj.clone(), "__len__").map(|len| {
-            let len = self.invoke(&len?, vec![])?;
+            let len = self.invoke(&len?, ())?;
             let len = len
                 .payload_if_subclass::<PyInt>(self)
                 .ok_or_else(|| {
                     self.new_type_error(format!(
                         "'{}' object cannot be interpreted as an integer",
-                        len.lease_class().name
+                        len.class().name
                     ))
                 })?
                 .borrow_value();
@@ -1517,11 +1563,20 @@ impl VirtualMachine {
         })
     }
 
+    pub fn obj_len(&self, obj: &PyObjectRef) -> PyResult<usize> {
+        self.obj_len_opt(obj).unwrap_or_else(|| {
+            Err(self.new_type_error(format!(
+                "object of type '{}' has no len()",
+                obj.class().name
+            )))
+        })
+    }
+
     // https://docs.python.org/3/reference/expressions.html#membership-test-operations
     fn _membership_iter_search(&self, haystack: PyObjectRef, needle: PyObjectRef) -> PyResult {
-        let iter = objiter::get_iter(self, &haystack)?;
+        let iter = iterator::get_iter(self, &haystack)?;
         loop {
-            if let Some(element) = objiter::get_next_object(self, &iter)? {
+            if let Some(element) = iterator::get_next_object(self, &iter)? {
                 if self.bool_eq(&needle, &element)? {
                     return Ok(self.ctx.new_bool(true));
                 } else {
@@ -1588,6 +1643,20 @@ impl VirtualMachine {
         Ok(value)
     }
 
+    pub fn map_codeobj(&self, code: bytecode::CodeObject) -> code::CodeObject {
+        code.map_bag(&code::PyObjBag(self))
+    }
+
+    pub fn intern_string<S: Internable>(&self, s: S) -> PyStrRef {
+        let (s, ()) = self
+            .ctx
+            .string_cache
+            .setdefault_entry(self, s, || ())
+            .expect("string_cache lookup should never error");
+        s.downcast()
+            .expect("only strings should be in string_cache")
+    }
+
     #[doc(hidden)]
     pub fn __module_set_attr(
         &self,
@@ -1596,9 +1665,22 @@ impl VirtualMachine {
         attr_value: impl Into<PyObjectRef>,
     ) -> PyResult<()> {
         let val = attr_value.into();
-        objobject::setattr(module.clone(), attr_name.try_into_ref(self)?, val, self)
+        object::setattr(module.clone(), attr_name.try_into_ref(self)?, val, self)
     }
 }
+
+mod sealed {
+    use super::*;
+    pub trait SealedInternable {}
+    impl SealedInternable for String {}
+    impl SealedInternable for &str {}
+    impl SealedInternable for PyRefExact<PyStr> {}
+}
+/// A sealed marker trait for `DictKey` types that always become an exact instance of `str`
+pub trait Internable: sealed::SealedInternable + crate::dictdatatype::DictKey {}
+impl Internable for String {}
+impl Internable for &str {}
+impl Internable for PyRefExact<PyStr> {}
 
 pub struct ReprGuard<'vm> {
     vm: &'vm VirtualMachine,
@@ -1716,7 +1798,7 @@ impl PyThread {
 #[cfg(test)]
 mod tests {
     use super::Interpreter;
-    use crate::obj::{objint, objstr};
+    use crate::builtins::{int, pystr};
     use num_bigint::ToBigInt;
 
     #[test]
@@ -1725,7 +1807,7 @@ mod tests {
             let a = vm.ctx.new_int(33_i32);
             let b = vm.ctx.new_int(12_i32);
             let res = vm._add(&a, &b).unwrap();
-            let value = objint::get_value(&res);
+            let value = int::get_value(&res);
             assert_eq!(*value, 45_i32.to_bigint().unwrap());
         })
     }
@@ -1736,7 +1818,7 @@ mod tests {
             let a = vm.ctx.new_str(String::from("Hello "));
             let b = vm.ctx.new_int(4_i32);
             let res = vm._mul(&a, &b).unwrap();
-            let value = objstr::borrow_value(&res);
+            let value = pystr::borrow_value(&res);
             assert_eq!(value, String::from("Hello Hello Hello Hello "))
         })
     }

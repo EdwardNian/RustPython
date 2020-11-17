@@ -2,21 +2,20 @@ pub(crate) use hashlib::make_module;
 
 #[pymodule]
 mod hashlib {
+    use crate::builtins::bytes::{PyBytes, PyBytesRef};
+    use crate::builtins::pystr::PyStrRef;
+    use crate::builtins::pytype::PyTypeRef;
     use crate::common::lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
-    use crate::function::{OptionalArg, PyFuncArgs};
-    use crate::obj::objbytes::{PyBytes, PyBytesRef};
-    use crate::obj::objstr::PyStrRef;
-    use crate::obj::objtype::PyTypeRef;
-    use crate::pyobject::{BorrowValue, PyResult, PyValue};
+    use crate::function::{FuncArgs, OptionalArg};
+    use crate::pyobject::{BorrowValue, PyResult, PyValue, StaticType};
     use crate::vm::VirtualMachine;
-    use std::fmt;
-
     use blake2::{Blake2b, Blake2s};
     use digest::DynDigest;
     use md5::Md5;
     use sha1::Sha1;
     use sha2::{Sha224, Sha256, Sha384, Sha512};
-    use sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512}; // TODO: , Shake128, Shake256};
+    use sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512}; // TODO: , Shake128, Shake256;
+    use std::fmt;
 
     #[pyattr]
     #[pyclass(module = "hashlib", name = "hasher")]
@@ -32,8 +31,8 @@ mod hashlib {
     }
 
     impl PyValue for PyHasher {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("hashlib", "hasher")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -55,7 +54,7 @@ mod hashlib {
         }
 
         #[pyslot]
-        fn tp_new(_cls: PyTypeRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn tp_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Ok(PyHasher::new("md5", HashWrapper::md5())
                 .into_ref(vm)
                 .into_object())

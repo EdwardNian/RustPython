@@ -1,45 +1,45 @@
-use crate::obj::objasyncgenerator;
-use crate::obj::objbool;
-use crate::obj::objbuiltinfunc;
-use crate::obj::objbytearray;
-use crate::obj::objbytes;
-use crate::obj::objclassmethod;
-use crate::obj::objcode;
-use crate::obj::objcomplex;
-use crate::obj::objcoroutine;
-use crate::obj::objdict;
-use crate::obj::objenumerate;
-use crate::obj::objfilter;
-use crate::obj::objfloat;
-use crate::obj::objframe;
-use crate::obj::objfunction;
-use crate::obj::objgenerator;
-use crate::obj::objgetset;
-use crate::obj::objint;
-use crate::obj::objiter;
-use crate::obj::objlist;
-use crate::obj::objmap;
-use crate::obj::objmappingproxy;
-use crate::obj::objmemory;
-use crate::obj::objmodule;
-use crate::obj::objnamespace;
-use crate::obj::objobject;
-use crate::obj::objproperty;
-use crate::obj::objrange;
-use crate::obj::objset;
-use crate::obj::objsingletons;
-use crate::obj::objslice;
-use crate::obj::objstaticmethod;
-use crate::obj::objstr;
-use crate::obj::objsuper;
-use crate::obj::objtraceback;
-use crate::obj::objtuple;
-use crate::obj::objtype::{self, PyType, PyTypeRef};
-use crate::obj::objweakproxy;
-use crate::obj::objweakref;
-use crate::obj::objzip;
+use crate::builtins::asyncgenerator;
+use crate::builtins::builtinfunc;
+use crate::builtins::bytearray;
+use crate::builtins::bytes;
+use crate::builtins::classmethod;
+use crate::builtins::code;
+use crate::builtins::complex;
+use crate::builtins::coroutine;
+use crate::builtins::dict;
+use crate::builtins::enumerate;
+use crate::builtins::filter;
+use crate::builtins::float;
+use crate::builtins::frame;
+use crate::builtins::function;
+use crate::builtins::generator;
+use crate::builtins::getset;
+use crate::builtins::int;
+use crate::builtins::iter;
+use crate::builtins::list;
+use crate::builtins::map;
+use crate::builtins::mappingproxy;
+use crate::builtins::memory;
+use crate::builtins::module;
+use crate::builtins::namespace;
+use crate::builtins::object;
+use crate::builtins::property;
+use crate::builtins::pybool;
+use crate::builtins::pystr;
+use crate::builtins::pysuper;
+use crate::builtins::pytype::{self, PyType, PyTypeRef};
+use crate::builtins::range;
+use crate::builtins::set;
+use crate::builtins::singletons;
+use crate::builtins::slice;
+use crate::builtins::staticmethod;
+use crate::builtins::traceback;
+use crate::builtins::tuple;
+use crate::builtins::weakproxy;
+use crate::builtins::weakref;
+use crate::builtins::zip;
 use crate::pyobject::{
-    PyAttributes, PyClassDef, PyClassImpl, PyContext, PyObject, PyObjectRc, PyObjectRef,
+    PyAttributes, PyClassDef, PyClassImpl, PyContext, PyObject, PyObjectRc, PyObjectRef, StaticType,
 };
 use crate::slots::PyTypeSlots;
 use rustpython_common::{lock::PyRwLock, rc::PyRc};
@@ -47,7 +47,7 @@ use std::mem::MaybeUninit;
 use std::ptr;
 
 /// Holder of references to builtin types.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeZoo {
     pub async_generator: PyTypeRef,
     pub async_generator_asend: PyTypeRef,
@@ -114,114 +114,156 @@ pub struct TypeZoo {
     pub mappingproxy_type: PyTypeRef,
     pub traceback_type: PyTypeRef,
     pub object_type: PyTypeRef,
-}
-
-impl Default for TypeZoo {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub ellipsis_type: PyTypeRef,
+    pub none_type: PyTypeRef,
+    pub not_implemented_type: PyTypeRef,
 }
 
 impl TypeZoo {
-    pub fn new() -> Self {
+    pub(crate) fn init() -> Self {
         let (type_type, object_type) = init_type_hierarchy();
-
-        macro_rules! create_type {
-            ($class:ty) => {
-                <$class>::create_bare_type(&type_type, object_type.clone())
-            };
-            ($class:ty, $base:expr) => {
-                <$class>::create_bare_type(&type_type, $base.clone())
-            };
-        }
-
-        let int_type = create_type!(objint::PyInt);
         Self {
-            async_generator: create_type!(objasyncgenerator::PyAsyncGen),
-            async_generator_asend: create_type!(objasyncgenerator::PyAsyncGenASend),
-            async_generator_athrow: create_type!(objasyncgenerator::PyAsyncGenAThrow),
-            async_generator_wrapped_value: create_type!(objasyncgenerator::PyAsyncGenWrappedValue),
-            bool_type: create_type!(objbool::PyBool, int_type),
-            bound_method_type: create_type!(objfunction::PyBoundMethod),
-            builtin_function_or_method_type: create_type!(objbuiltinfunc::PyBuiltinFunction),
-            bytearray_type: create_type!(objbytearray::PyByteArray),
-            bytearray_iterator_type: create_type!(objbytearray::PyByteArrayIterator),
-            bytes_type: create_type!(objbytes::PyBytes),
-            bytes_iterator_type: create_type!(objbytes::PyBytesIterator),
-            callable_iterator: create_type!(objiter::PyCallableIterator),
-            classmethod_type: create_type!(objclassmethod::PyClassMethod),
-            code_type: create_type!(objcode::PyCodeRef),
-            complex_type: create_type!(objcomplex::PyComplex),
-            coroutine_type: create_type!(objcoroutine::PyCoroutine),
-            coroutine_wrapper_type: create_type!(objcoroutine::PyCoroutineWrapper),
-            dict_type: create_type!(objdict::PyDict),
-            dict_keys_type: create_type!(objdict::PyDictKeys),
-            dict_values_type: create_type!(objdict::PyDictValues),
-            dict_items_type: create_type!(objdict::PyDictItems),
-            dict_keyiterator_type: create_type!(objdict::PyDictKeyIterator),
-            dict_reversekeyiterator_type: create_type!(objdict::PyDictReverseKeyIterator),
-            dict_valueiterator_type: create_type!(objdict::PyDictValueIterator),
-            dict_reversevalueiterator_type: create_type!(objdict::PyDictReverseValueIterator),
-            dict_itemiterator_type: create_type!(objdict::PyDictItemIterator),
-            dict_reverseitemiterator_type: create_type!(objdict::PyDictReverseItemIterator),
-            enumerate_type: create_type!(objenumerate::PyEnumerate),
-            filter_type: create_type!(objfilter::PyFilter),
-            float_type: create_type!(objfloat::PyFloat),
-            frame_type: create_type!(crate::frame::FrameRef),
-            frozenset_type: create_type!(objset::PyFrozenSet),
-            function_type: create_type!(objfunction::PyFunction),
-            generator_type: create_type!(objgenerator::PyGenerator),
-            getset_type: create_type!(objgetset::PyGetSet),
-            int_type,
-            iter_type: create_type!(objiter::PySequenceIterator),
-            list_type: create_type!(objlist::PyList),
-            list_iterator_type: create_type!(objlist::PyListIterator),
-            list_reverseiterator_type: create_type!(objlist::PyListReverseIterator),
-            map_type: create_type!(objmap::PyMap),
-            mappingproxy_type: create_type!(objmappingproxy::PyMappingProxy),
-            memoryview_type: create_type!(objmemory::PyMemoryView),
-            module_type: create_type!(objmodule::PyModule),
-            namespace_type: create_type!(objnamespace::PyNamespace),
-            property_type: create_type!(objproperty::PyProperty),
-            range_type: create_type!(objrange::PyRange),
-            range_iterator_type: create_type!(objrange::PyRangeIterator),
-            set_type: create_type!(objset::PySet),
-            set_iterator_type: create_type!(objset::PySetIterator),
-            slice_type: create_type!(objslice::PySlice),
-            staticmethod_type: create_type!(objstaticmethod::PyStaticMethod),
-            str_type: create_type!(objstr::PyStr),
-            str_iterator_type: create_type!(objstr::PyStrIterator),
-            str_reverseiterator_type: create_type!(objstr::PyStrReverseIterator),
-            super_type: create_type!(objsuper::PySuper),
-            traceback_type: create_type!(objtraceback::PyTraceback),
-            tuple_type: create_type!(objtuple::PyTuple),
-            tuple_iterator_type: create_type!(objtuple::PyTupleIterator),
-            weakproxy_type: create_type!(objweakproxy::PyWeakProxy),
-            weakref_type: create_type!(objweakref::PyWeak),
-            method_descriptor_type: create_type!(objbuiltinfunc::PyBuiltinMethod),
-            zip_type: create_type!(objzip::PyZip),
-            type_type,
-            object_type,
+            // the order matters for type, object and int
+            type_type: pytype::PyType::init_manually(type_type).clone(),
+            object_type: object::PyBaseObject::init_manually(object_type).clone(),
+            int_type: int::PyInt::init_bare_type().clone(),
+
+            // types exposed as builtins
+            bool_type: pybool::PyBool::init_bare_type().clone(),
+            bytearray_type: bytearray::PyByteArray::init_bare_type().clone(),
+            bytes_type: bytes::PyBytes::init_bare_type().clone(),
+            classmethod_type: classmethod::PyClassMethod::init_bare_type().clone(),
+            complex_type: complex::PyComplex::init_bare_type().clone(),
+            dict_type: dict::PyDict::init_bare_type().clone(),
+            enumerate_type: enumerate::PyEnumerate::init_bare_type().clone(),
+            float_type: float::PyFloat::init_bare_type().clone(),
+            frozenset_type: set::PyFrozenSet::init_bare_type().clone(),
+            filter_type: filter::PyFilter::init_bare_type().clone(),
+            list_type: list::PyList::init_bare_type().clone(),
+            map_type: map::PyMap::init_bare_type().clone(),
+            memoryview_type: memory::PyMemoryView::init_bare_type().clone(),
+            property_type: property::PyProperty::init_bare_type().clone(),
+            range_type: range::PyRange::init_bare_type().clone(),
+            set_type: set::PySet::init_bare_type().clone(),
+            slice_type: slice::PySlice::init_bare_type().clone(),
+            staticmethod_type: staticmethod::PyStaticMethod::init_bare_type().clone(),
+            str_type: pystr::PyStr::init_bare_type().clone(),
+            super_type: pysuper::PySuper::init_bare_type().clone(),
+            tuple_type: tuple::PyTuple::init_bare_type().clone(),
+            zip_type: zip::PyZip::init_bare_type().clone(),
+
+            // hidden internal types. is this really need to be cached here?
+            async_generator: asyncgenerator::PyAsyncGen::init_bare_type().clone(),
+            async_generator_asend: asyncgenerator::PyAsyncGenASend::init_bare_type().clone(),
+            async_generator_athrow: asyncgenerator::PyAsyncGenAThrow::init_bare_type().clone(),
+            async_generator_wrapped_value: asyncgenerator::PyAsyncGenWrappedValue::init_bare_type()
+                .clone(),
+            bound_method_type: function::PyBoundMethod::init_bare_type().clone(),
+            builtin_function_or_method_type: builtinfunc::PyBuiltinFunction::init_bare_type()
+                .clone(),
+            bytearray_iterator_type: bytearray::PyByteArrayIterator::init_bare_type().clone(),
+            bytes_iterator_type: bytes::PyBytesIterator::init_bare_type().clone(),
+            callable_iterator: iter::PyCallableIterator::init_bare_type().clone(),
+            code_type: code::PyCode::init_bare_type().clone(),
+            coroutine_type: coroutine::PyCoroutine::init_bare_type().clone(),
+            coroutine_wrapper_type: coroutine::PyCoroutineWrapper::init_bare_type().clone(),
+            dict_keys_type: dict::PyDictKeys::init_bare_type().clone(),
+            dict_values_type: dict::PyDictValues::init_bare_type().clone(),
+            dict_items_type: dict::PyDictItems::init_bare_type().clone(),
+            dict_keyiterator_type: dict::PyDictKeyIterator::init_bare_type().clone(),
+            dict_reversekeyiterator_type: dict::PyDictReverseKeyIterator::init_bare_type().clone(),
+            dict_valueiterator_type: dict::PyDictValueIterator::init_bare_type().clone(),
+            dict_reversevalueiterator_type: dict::PyDictReverseValueIterator::init_bare_type()
+                .clone(),
+            dict_itemiterator_type: dict::PyDictItemIterator::init_bare_type().clone(),
+            dict_reverseitemiterator_type: dict::PyDictReverseItemIterator::init_bare_type()
+                .clone(),
+            ellipsis_type: slice::PyEllipsis::init_bare_type().clone(),
+            frame_type: crate::frame::Frame::init_bare_type().clone(),
+            function_type: function::PyFunction::init_bare_type().clone(),
+            generator_type: generator::PyGenerator::init_bare_type().clone(),
+            getset_type: getset::PyGetSet::init_bare_type().clone(),
+            iter_type: iter::PySequenceIterator::init_bare_type().clone(),
+            list_iterator_type: list::PyListIterator::init_bare_type().clone(),
+            list_reverseiterator_type: list::PyListReverseIterator::init_bare_type().clone(),
+            mappingproxy_type: mappingproxy::PyMappingProxy::init_bare_type().clone(),
+            module_type: module::PyModule::init_bare_type().clone(),
+            namespace_type: namespace::PyNamespace::init_bare_type().clone(),
+            range_iterator_type: range::PyRangeIterator::init_bare_type().clone(),
+            set_iterator_type: set::PySetIterator::init_bare_type().clone(),
+            str_iterator_type: pystr::PyStrIterator::init_bare_type().clone(),
+            str_reverseiterator_type: pystr::PyStrReverseIterator::init_bare_type().clone(),
+            traceback_type: traceback::PyTraceback::init_bare_type().clone(),
+            tuple_iterator_type: tuple::PyTupleIterator::init_bare_type().clone(),
+            weakproxy_type: weakproxy::PyWeakProxy::init_bare_type().clone(),
+            weakref_type: weakref::PyWeak::init_bare_type().clone(),
+            method_descriptor_type: builtinfunc::PyBuiltinMethod::init_bare_type().clone(),
+            none_type: singletons::PyNone::init_bare_type().clone(),
+            not_implemented_type: singletons::PyNotImplemented::init_bare_type().clone(),
         }
+    }
+
+    /// Fill attributes of builtin types.
+    pub(crate) fn extend(context: &PyContext) {
+        pytype::init(&context);
+        object::init(&context);
+        list::init(&context);
+        set::init(&context);
+        tuple::init(&context);
+        dict::init(&context);
+        builtinfunc::init(&context);
+        function::init(&context);
+        staticmethod::init(&context);
+        classmethod::init(&context);
+        generator::init(&context);
+        coroutine::init(&context);
+        asyncgenerator::init(&context);
+        int::init(&context);
+        float::init(&context);
+        complex::init(&context);
+        bytes::init(&context);
+        bytearray::init(&context);
+        property::init(&context);
+        getset::init(&context);
+        memory::init(&context);
+        pystr::init(&context);
+        range::init(&context);
+        slice::init(&context);
+        pysuper::init(&context);
+        iter::init(&context);
+        enumerate::init(&context);
+        filter::init(&context);
+        map::init(&context);
+        zip::init(&context);
+        pybool::init(&context);
+        code::init(&context);
+        frame::init(&context);
+        weakref::init(&context);
+        weakproxy::init(&context);
+        singletons::init(&context);
+        module::init(&context);
+        namespace::init(&context);
+        mappingproxy::init(&context);
+        traceback::init(&context);
     }
 }
 
-pub fn create_type(name: &str, type_type: &PyTypeRef, base: PyTypeRef) -> PyTypeRef {
-    create_type_with_slots(name, type_type, base, Default::default())
+pub fn create_simple_type(name: &str, base: &PyTypeRef) -> PyTypeRef {
+    create_type_with_slots(name, PyType::static_type(), base, Default::default())
 }
 
 pub fn create_type_with_slots(
     name: &str,
     type_type: &PyTypeRef,
-    base: PyTypeRef,
+    base: &PyTypeRef,
     slots: PyTypeSlots,
 ) -> PyTypeRef {
     let dict = PyAttributes::new();
-    objtype::new(
+    pytype::new(
         type_type.clone(),
         name,
         base.clone(),
-        vec![base],
+        vec![base.clone()],
         dict,
         slots,
     )
@@ -267,16 +309,16 @@ fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef) {
             mro: vec![],
             subclasses: PyRwLock::default(),
             attributes: PyRwLock::new(PyAttributes::new()),
-            slots: objtype::PyType::make_slots(),
+            slots: PyType::make_slots(),
         };
         let object_payload = PyType {
-            name: objobject::PyBaseObject::NAME.to_owned(),
+            name: object::PyBaseObject::NAME.to_owned(),
             base: None,
             bases: vec![],
             mro: vec![],
             subclasses: PyRwLock::default(),
             attributes: PyRwLock::new(PyAttributes::new()),
-            slots: objobject::PyBaseObject::make_slots(),
+            slots: object::PyBaseObject::make_slots(),
         };
         let type_type: PyRc<MaybeUninit<PyTypeObj>> = PyRc::new(partially_init!(
             PyObject::<PyType> {
@@ -324,51 +366,7 @@ fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef) {
     object_type
         .subclasses
         .write()
-        .push(objweakref::PyWeak::downgrade(&type_type.as_object()));
+        .push(weakref::PyWeak::downgrade(&type_type.as_object()));
 
     (type_type, object_type)
-}
-
-/// Fill attributes of builtin types.
-pub fn initialize_types(context: &PyContext) {
-    objtype::init(&context);
-    objobject::init(&context);
-    objlist::init(&context);
-    objset::init(&context);
-    objtuple::init(&context);
-    objdict::init(&context);
-    objbuiltinfunc::init(&context);
-    objfunction::init(&context);
-    objstaticmethod::init(&context);
-    objclassmethod::init(&context);
-    objgenerator::init(&context);
-    objcoroutine::init(&context);
-    objasyncgenerator::init(&context);
-    objint::init(&context);
-    objfloat::init(&context);
-    objcomplex::init(&context);
-    objbytes::init(&context);
-    objbytearray::init(&context);
-    objproperty::init(&context);
-    objgetset::init(&context);
-    objmemory::init(&context);
-    objstr::init(&context);
-    objrange::init(&context);
-    objslice::init(&context);
-    objsuper::init(&context);
-    objiter::init(&context);
-    objenumerate::init(&context);
-    objfilter::init(&context);
-    objmap::init(&context);
-    objzip::init(&context);
-    objbool::init(&context);
-    objcode::init(&context);
-    objframe::init(&context);
-    objweakref::init(&context);
-    objweakproxy::init(&context);
-    objsingletons::init(&context);
-    objmodule::init(&context);
-    objnamespace::init(&context);
-    objmappingproxy::init(&context);
-    objtraceback::init(&context);
 }

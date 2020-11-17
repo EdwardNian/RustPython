@@ -3,22 +3,17 @@
  *
  */
 
+use num_bigint::BigInt;
+use num_traits::{One, Signed, Zero};
 use statrs::function::erf::{erf, erfc};
 use statrs::function::gamma::{gamma, ln_gamma};
 
-use num_bigint::BigInt;
-use num_traits::{One, Signed, Zero};
-
+use crate::builtins::float::{self, IntoPyFloat, PyFloatRef};
+use crate::builtins::int::{self, PyInt, PyIntRef};
 use crate::function::{Args, OptionalArg};
-use crate::obj::objfloat::{self, IntoPyFloat, PyFloatRef};
-use crate::obj::objint::{self, PyInt, PyIntRef};
-use crate::obj::objtype;
 use crate::pyobject::{BorrowValue, Either, PyObjectRef, PyResult, TypeProtocol};
 use crate::vm::VirtualMachine;
 use rustpython_common::float_ops;
-
-#[cfg(not(target_arch = "wasm32"))]
-use libc::c_double;
 
 use std::cmp::Ordering;
 
@@ -136,15 +131,8 @@ fn math_sqrt(value: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
 }
 
 fn math_isqrt(x: PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt> {
-    let index = vm.to_index(&x).ok_or_else(|| {
-        vm.new_type_error(format!(
-            "'{}' object cannot be interpreted as an integer",
-            x.class().name
-        ))
-    })?;
-    // __index__ may have returned non-int type
-    let python_value = index?;
-    let value = python_value.borrow_value();
+    let index = vm.to_index(&x)?;
+    let value = index.borrow_value();
 
     if value.is_negative() {
         return Err(vm.new_value_error("isqrt() argument must be nonnegative".to_owned()));
@@ -179,8 +167,43 @@ fn math_atan2(y: IntoPyFloat, x: IntoPyFloat) -> f64 {
 
 make_math_func!(math_cos, cos);
 
-fn math_hypot(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
-    x.to_f64().hypot(y.to_f64())
+fn math_hypot(coordinates: Args<IntoPyFloat>) -> f64 {
+    let mut coordinates = IntoPyFloat::vec_into_f64(coordinates.into_vec());
+    let mut max = 0.0;
+    let mut has_nan = false;
+    for f in &mut coordinates {
+        *f = f.abs();
+        if f.is_nan() {
+            has_nan = true;
+        } else if *f > max {
+            max = *f
+        }
+    }
+    // inf takes precedence over nan
+    if max.is_infinite() {
+        return max;
+    }
+    if has_nan {
+        return f64::NAN;
+    }
+    vector_norm(&coordinates, max)
+}
+
+fn vector_norm(v: &[f64], max: f64) -> f64 {
+    if max == 0.0 || v.len() <= 1 {
+        return max;
+    }
+    let mut csum = 1.0;
+    let mut frac = 0.0;
+    for &f in v {
+        let f = f / max;
+        let f = f * f;
+        let old = csum;
+        csum += f;
+        // this seemingly redundant operation is to reduce float rounding errors/inaccuracy
+        frac += (old - csum) + f;
+    }
+    max * f64::sqrt(csum - 1.0 + frac)
 }
 
 make_math_func!(math_sin, sin);
@@ -195,7 +218,15 @@ fn math_radians(x: IntoPyFloat) -> f64 {
 }
 
 // Hyperbolic functions:
-make_math_func!(math_acosh, acosh);
+fn math_acosh(x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let x = x.to_f64();
+    if x.is_sign_negative() || x.is_zero() {
+        Err(vm.new_value_error("math domain error".to_owned()))
+    } else {
+        Ok(x.acosh())
+    }
+}
+
 make_math_func!(math_asinh, asinh);
 make_math_func!(math_atanh, atanh);
 make_math_func!(math_cosh, cosh);
@@ -247,11 +278,11 @@ fn try_magic_method(func_name: &str, vm: &VirtualMachine, value: &PyObjectRef) -
     let method = vm.get_method_or_type_error(value.clone(), func_name, || {
         format!(
             "type '{}' doesn't define '{}' method",
-            value.lease_class().name,
+            value.class().name,
             func_name,
         )
     })?;
-    vm.invoke(&method, vec![])
+    vm.invoke(&method, ())
 }
 
 fn math_trunc(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
@@ -265,9 +296,9 @@ fn math_trunc(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
 /// * `value` - Either a float or a python object which implements __ceil__
 /// * `vm` - Represents the python state.
 fn math_ceil(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-    if objtype::isinstance(&value, &vm.ctx.types.float_type) {
-        let v = objfloat::get_value(&value);
-        let v = objfloat::try_bigint(v.ceil(), vm)?;
+    if value.isinstance(&vm.ctx.types.float_type) {
+        let v = float::get_value(&value);
+        let v = float::try_bigint(v.ceil(), vm)?;
         Ok(vm.ctx.new_int(v))
     } else {
         try_magic_method("__ceil__", vm, &value)
@@ -281,9 +312,9 @@ fn math_ceil(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
 /// * `value` - Either a float or a python object which implements __ceil__
 /// * `vm` - Represents the python state.
 fn math_floor(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-    if objtype::isinstance(&value, &vm.ctx.types.float_type) {
-        let v = objfloat::get_value(&value);
-        let v = objfloat::try_bigint(v.floor(), vm)?;
+    if value.isinstance(&vm.ctx.types.float_type) {
+        let v = float::get_value(&value);
+        let v = float::try_bigint(v.floor(), vm)?;
         Ok(vm.ctx.new_int(v))
     } else {
         try_magic_method("__floor__", vm, &value)
@@ -307,9 +338,9 @@ fn math_ldexp(
 ) -> PyResult<f64> {
     let value = match value {
         Either::A(f) => f.to_f64(),
-        Either::B(z) => objint::try_float(z.borrow_value(), vm)?,
+        Either::B(z) => int::to_float(z.borrow_value(), vm)?,
     };
-    Ok(value * (2_f64).powf(objint::try_float(i.borrow_value(), vm)?))
+    Ok(value * (2_f64).powf(int::to_float(i.borrow_value(), vm)?))
 }
 
 fn math_perf_arb_len_int_op<F>(args: Args<PyIntRef>, op: F, default: BigInt) -> BigInt
@@ -365,19 +396,12 @@ fn math_modf(x: IntoPyFloat) -> (f64, f64) {
     (x.fract(), x.trunc())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> PyResult<f64> {
-    extern "C" {
-        fn nextafter(x: c_double, y: c_double) -> c_double;
-    }
-    let x = x.to_f64();
-    let y = y.to_f64();
-    Ok(unsafe { nextafter(x, y) })
+fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
+    float_ops::nextafter(x.to_f64(), y.to_f64())
 }
 
-#[cfg(target_arch = "wasm32")]
-fn math_nextafter(_x: IntoPyFloat, _y: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
-    Err(vm.new_not_implemented_error("not implemented for this platform".to_owned()))
+fn math_ulp(x: IntoPyFloat) -> f64 {
+    float_ops::ulp(x.to_f64())
 }
 
 fn fmod(x: f64, y: f64) -> f64 {
@@ -506,7 +530,9 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         // Factorial function
         "factorial" => named_function!(ctx, math, factorial),
 
+        // Floating point
         "nextafter" => named_function!(ctx, math, nextafter),
+        "ulp" => named_function!(ctx, math, ulp),
 
         // Constants:
         "pi" => ctx.new_float(std::f64::consts::PI), // 3.14159...

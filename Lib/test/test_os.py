@@ -190,8 +190,6 @@ class FileTests(unittest.TestCase):
         new = sys.getrefcount(path)
         self.assertEqual(old, new)
 
-    # TODO: RUSTPYTHON (OSError: Bad file descriptor (os error 9))
-    @unittest.expectedFailure
     def test_read(self):
         with open(support.TESTFN, "w+b") as fobj:
             fobj.write(b"spam")
@@ -222,8 +220,6 @@ class FileTests(unittest.TestCase):
         # operating system is free to return less bytes than requested.
         self.assertEqual(data, b'test')
 
-    # TODO: RUSTPYTHON (TypeError: a bytes-like object is required, not memoryview)
-    @unittest.expectedFailure
     def test_write(self):
         # os.write() accepts bytes- and buffer-like objects but not strings
         fd = os.open(support.TESTFN, os.O_CREAT | os.O_WRONLY)
@@ -3069,6 +3065,7 @@ class SendfileTestServer(asyncore.dispatcher, threading.Thread):
         raise
 
 
+@unittest.skip("TODO: RUSTPYTHON (ValueError: invalid mode: 'xb')")
 @unittest.skipUnless(hasattr(os, 'sendfile'), "test needs os.sendfile()")
 class TestSendfile(unittest.TestCase):
 

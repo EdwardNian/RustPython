@@ -73,7 +73,7 @@ pub(crate) fn impl_pyimpl(
 
                     fn impl_extend_class(
                         ctx: &::rustpython_vm::pyobject::PyContext,
-                        class: &::rustpython_vm::obj::objtype::PyTypeRef,
+                        class: &::rustpython_vm::builtins::PyTypeRef,
                     ) {
                         #getset_impl
                         #extend_impl
@@ -100,7 +100,7 @@ pub(crate) fn impl_pyimpl(
                 parse_quote! {
                     fn __extend_py_class(
                         ctx: &::rustpython_vm::pyobject::PyContext,
-                        class: &::rustpython_vm::obj::objtype::PyTypeRef,
+                        class: &::rustpython_vm::builtins::PyTypeRef,
                     ) {
                         #getset_impl
                         #extend_impl
@@ -133,6 +133,7 @@ fn generate_class_def(
     ident: &Ident,
     name: &str,
     module_name: Option<&str>,
+    base: Option<String>,
     attrs: &[Attribute],
 ) -> std::result::Result<TokenStream, Diagnostic> {
     let doc = if let Some(doc) = attrs.doc() {
@@ -159,11 +160,27 @@ fn generate_class_def(
                 false
             }
     });
+    if base.is_some() && is_pystruct {
+        return Err(syn::Error::new_spanned(
+            ident,
+            "PyStructSequence cannot have `base` class attr",
+        )
+        .into());
+    }
+    let base = base.map(|name| Ident::new(&name, ident.span()));
 
     let base_class = if is_pystruct {
         quote! {
-            fn base_class(ctx: &::rustpython_vm::pyobject::PyContext) -> ::rustpython_vm::obj::objtype::PyTypeRef {
-                ctx.types.tuple_type.clone()
+            fn static_baseclass() -> &'static ::rustpython_vm::builtins::PyTypeRef {
+                use rustpython_vm::pyobject::StaticType;
+                rustpython_vm::builtins::PyTuple::static_type()
+            }
+        }
+    } else if let Some(base) = base {
+        quote! {
+            fn static_baseclass() -> &'static ::rustpython_vm::builtins::PyTypeRef {
+                use rustpython_vm::pyobject::StaticType;
+                #base::static_type()
             }
         }
     } else {
@@ -176,6 +193,16 @@ fn generate_class_def(
             const MODULE_NAME: Option<&'static str> = #module_name;
             const TP_NAME: &'static str = #module_class_name;
             const DOC: Option<&'static str> = #doc;
+        }
+
+        impl ::rustpython_vm::pyobject::StaticType for #ident {
+            fn static_cell() -> &'static ::rustpython_common::static_cell::StaticCell<::rustpython_vm::builtins::PyTypeRef> {
+                ::rustpython_common::static_cell! {
+                    static CELL: ::rustpython_vm::builtins::PyTypeRef;
+                }
+                &CELL
+            }
+
             #base_class
         }
     };
@@ -191,7 +218,8 @@ pub(crate) fn impl_pyclass(
     let class_meta = ClassItemMeta::from_nested(ident.clone(), fake_ident, attr.into_iter())?;
     let class_name = class_meta.class_name()?;
     let module_name = class_meta.module()?;
-    let class_def = generate_class_def(&ident, &class_name, module_name.as_deref(), &attrs)?;
+    let base = class_meta.base()?;
+    let class_def = generate_class_def(&ident, &class_name, module_name.as_deref(), base, &attrs)?;
 
     let ret = quote! {
         #item
@@ -344,16 +372,22 @@ where
         let slot_ident = item_meta.slot_name()?;
         let slot_name = slot_ident.to_string();
         let tokens = {
-            if slot_name == "new" {
-                let into_func = quote_spanned! {ident.span() =>
+            let into_func = if slot_name == "new" {
+                quote_spanned! {ident.span() =>
                     ::rustpython_vm::function::IntoPyNativeFunc::into_func(Self::#ident)
-                };
+                }
+            } else {
+                quote_spanned! {ident.span() =>
+                    Self::#ident as _
+                }
+            };
+            if slot_name == "new" || slot_name == "buffer" {
                 quote! {
                     slots.#slot_ident = Some(#into_func);
                 }
             } else {
                 quote! {
-                    slots.#slot_ident.store(Some(Self::#ident as _))
+                    slots.#slot_ident.store(Some(#into_func))
                 }
             }
         };
@@ -496,7 +530,7 @@ impl ToTokens for GetSetNursery {
                 class.set_str_attr(
                     #name,
                     ::rustpython_vm::pyobject::PyObject::new(
-                        ::rustpython_vm::obj::objgetset::PyGetSet::#constructor(#name.into(), &Self::#getter #setter),
+                        ::rustpython_vm::builtins::PyGetSet::#constructor(#name.into(), &Self::#getter #setter),
                         ctx.types.getset_type.clone(), None)
                 );
             }

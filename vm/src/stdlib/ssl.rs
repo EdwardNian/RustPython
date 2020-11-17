@@ -1,16 +1,16 @@
 use super::socket::PySocketRef;
+use crate::builtins::bytearray::PyByteArrayRef;
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::{pytype::PyTypeRef, weakref::PyWeak};
 use crate::byteslike::PyBytesLike;
 use crate::common::lock::{PyRwLock, PyRwLockWriteGuard};
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
 use crate::function::OptionalArg;
-use crate::obj::objbytearray::PyByteArrayRef;
-use crate::obj::objstr::PyStrRef;
-use crate::obj::{objtype::PyTypeRef, objweakref::PyWeak};
 use crate::pyobject::{
     BorrowValue, Either, IntoPyObject, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult,
-    PyValue,
+    PyValue, StaticType,
 };
-use crate::types::create_type;
+use crate::types::create_simple_type;
 use crate::VirtualMachine;
 
 use foreign_types_shared::{ForeignType, ForeignTypeRef};
@@ -113,7 +113,7 @@ fn obj2py(obj: &Asn1ObjectRef) -> PyNid {
 
 #[cfg(windows)]
 fn ssl_enum_certificates(store_name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-    use crate::obj::objset::PyFrozenSet;
+    use crate::builtins::set::PyFrozenSet;
     use schannel::{cert_context::ValidUses, cert_store::CertStore, RawPointer};
     use winapi::um::wincrypt;
     // TODO: check every store for it, not just 2 of them:
@@ -241,8 +241,8 @@ impl fmt::Debug for PySslContext {
 }
 
 impl PyValue for PySslContext {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_ssl", "_SSLContext")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -520,8 +520,8 @@ impl fmt::Debug for PySslSocket {
 }
 
 impl PyValue for PySslSocket {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_ssl", "_SSLSocket")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -751,11 +751,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     }
     openssl::init();
     let ctx = &vm.ctx;
-    let ssl_error = create_type(
-        "SSLError",
-        &vm.ctx.types.type_type,
-        vm.ctx.exceptions.os_error.clone(),
-    );
+    let ssl_error = create_simple_type("SSLError", &vm.ctx.exceptions.os_error);
     let module = py_module!(vm, "_ssl", {
         "_SSLContext" => PySslContext::make_class(ctx),
         "_SSLSocket" => PySslSocket::make_class(ctx),

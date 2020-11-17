@@ -41,7 +41,7 @@ macro_rules! py_class {
             #[allow(unused_mut)]
             let mut slots = $crate::slots::PyTypeSlots::from_flags($crate::slots::PyTpFlags::DEFAULT | $flags);
             $($crate::py_class!(@extract_slots($ctx, &mut slots, $name, $value));)*
-            let py_class = $ctx.new_class($class_name, $class_base.clone(), slots);
+            let py_class = $ctx.new_class($class_name, $class_base, slots);
             $($crate::py_class!(@extract_attrs($ctx, &py_class, $name, $value));)*
             $ctx.add_tp_new_wrapper(&py_class);
             py_class
@@ -97,8 +97,8 @@ macro_rules! py_namespace {
 /// use num_traits::Zero;
 ///
 /// use rustpython_vm::match_class;
-/// use rustpython_vm::obj::objfloat::PyFloat;
-/// use rustpython_vm::obj::objint::PyInt;
+/// use rustpython_vm::builtins::PyFloat;
+/// use rustpython_vm::builtins::PyInt;
 /// use rustpython_vm::pyobject::PyValue;
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {
@@ -122,8 +122,8 @@ macro_rules! py_namespace {
 /// use num_traits::Zero;
 ///
 /// use rustpython_vm::match_class;
-/// use rustpython_vm::obj::objfloat::PyFloat;
-/// use rustpython_vm::obj::objint::PyInt;
+/// use rustpython_vm::builtins::PyFloat;
+/// use rustpython_vm::builtins::PyInt;
 /// use rustpython_vm::pyobject::{PyValue, BorrowValue};
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {

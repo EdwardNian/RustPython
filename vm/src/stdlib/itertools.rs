@@ -6,19 +6,18 @@ mod decl {
     use num_bigint::BigInt;
     use num_traits::{One, Signed, ToPrimitive, Zero};
     use std::fmt;
-    use std::iter;
 
+    use crate::builtins::int::{self, PyInt, PyIntRef};
+    use crate::builtins::pybool;
+    use crate::builtins::pytype::PyTypeRef;
+    use crate::builtins::tuple::PyTupleRef;
     use crate::common::lock::{PyMutex, PyRwLock, PyRwLockWriteGuard};
     use crate::common::rc::PyRc;
-    use crate::function::{Args, OptionalArg, OptionalOption, PyFuncArgs};
-    use crate::obj::objbool;
-    use crate::obj::objint::{self, PyInt, PyIntRef};
-    use crate::obj::objiter::{call_next, get_all, get_iter, get_next_object, new_stop_iteration};
-    use crate::obj::objtuple::PyTupleRef;
-    use crate::obj::objtype::{self, PyTypeRef};
+    use crate::function::{Args, FuncArgs, OptionalArg, OptionalOption};
+    use crate::iterator::{call_next, get_all, get_iter, get_next_object};
     use crate::pyobject::{
         BorrowValue, IdProtocol, IntoPyRef, PyCallable, PyObjectRc, PyObjectRef, PyObjectWeak,
-        PyRef, PyResult, PyValue, TypeProtocol,
+        PyRef, PyResult, PyValue, StaticType, TypeProtocol,
     };
     use crate::vm::VirtualMachine;
 
@@ -32,15 +31,15 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsChain {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "chain")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
     #[pyimpl]
     impl PyItertoolsChain {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        fn tp_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             PyItertoolsChain {
                 iterables: args.args,
                 cur_idx: AtomicCell::new(0),
@@ -72,7 +71,7 @@ mod decl {
                 match call_next(vm, &cur_iter) {
                     Ok(ok) => return Ok(ok),
                     Err(err) => {
-                        if objtype::isinstance(&err, &vm.ctx.exceptions.stop_iteration) {
+                        if err.isinstance(&vm.ctx.exceptions.stop_iteration) {
                             self.cur_idx.fetch_add(1);
                             *self.cached_iter.write() = None;
                         } else {
@@ -82,7 +81,7 @@ mod decl {
                 }
             }
 
-            Err(new_stop_iteration(vm))
+            Err(vm.new_stop_iteration())
         }
 
         #[pymethod(name = "__iter__")]
@@ -117,8 +116,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsCompress {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "compress")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -145,7 +144,7 @@ mod decl {
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             loop {
                 let sel_obj = call_next(vm, &self.selector)?;
-                let verdict = objbool::boolval(vm, sel_obj.clone())?;
+                let verdict = pybool::boolval(vm, sel_obj.clone())?;
                 let data_obj = call_next(vm, &self.data)?;
 
                 if verdict {
@@ -169,8 +168,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsCount {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "count")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -223,8 +222,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsCycle {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "cycle")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -254,7 +253,7 @@ mod decl {
             } else {
                 let saved = self.saved.read();
                 if saved.len() == 0 {
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
 
                 let last_index = self.index.fetch_add(1);
@@ -284,8 +283,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsRepeat {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "repeat")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -311,7 +310,7 @@ mod decl {
             if let Some(ref times) = self.times {
                 let mut times = times.write();
                 if !times.is_positive() {
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
                 *times -= 1;
             }
@@ -342,8 +341,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsStarmap {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "starmap")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -385,8 +384,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsTakewhile {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "takewhile")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -412,20 +411,20 @@ mod decl {
         #[pymethod(name = "__next__")]
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             if self.stop_flag.load() {
-                return Err(new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             // might be StopIteration or anything else, which is propagated upwards
             let obj = call_next(vm, &self.iterable)?;
             let predicate = &self.predicate;
 
-            let verdict = vm.invoke(predicate, vec![obj.clone()])?;
-            let verdict = objbool::boolval(vm, verdict)?;
+            let verdict = vm.invoke(predicate, (obj.clone(),))?;
+            let verdict = pybool::boolval(vm, verdict)?;
             if verdict {
                 Ok(obj)
             } else {
                 self.stop_flag.store(true);
-                Err(new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             }
         }
 
@@ -445,8 +444,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsDropwhile {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "dropwhile")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -478,8 +477,8 @@ mod decl {
                 loop {
                     let obj = call_next(vm, iterable)?;
                     let pred = predicate.clone();
-                    let pred_value = vm.invoke(&pred.into_object(), vec![obj.clone()])?;
-                    if !objbool::boolval(vm, pred_value)? {
+                    let pred_value = vm.invoke(&pred.into_object(), (obj.clone(),))?;
+                    if !pybool::boolval(vm, pred_value)? {
                         self.start_flag.store(true);
                         return Ok(obj);
                     }
@@ -529,8 +528,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsGroupBy {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "groupby")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -618,7 +617,7 @@ mod decl {
         pub(super) fn advance(&self, vm: &VirtualMachine) -> PyResult<(PyObjectRef, PyObjectRef)> {
             let new_value = call_next(vm, &self.iterable)?;
             let new_key = if let Some(ref kf) = self.key_func {
-                vm.invoke(kf, new_value.clone())?
+                vm.invoke(kf, vec![new_value.clone()])?
             } else {
                 new_value.clone()
             };
@@ -636,8 +635,8 @@ mod decl {
     type PyItertoolsGrouperRef = PyRef<PyItertoolsGrouper>;
 
     impl PyValue for PyItertoolsGrouper {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "_grouper")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -649,7 +648,7 @@ mod decl {
                 let mut state = zelf.groupby.state.lock();
 
                 if !state.is_current(&zelf) {
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
 
                 // check to see if the value has already been retrieved from the iterator
@@ -668,7 +667,7 @@ mod decl {
                 state.current_key = Some(key);
                 state.next_group = true;
                 state.grouper = None;
-                Err(new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             }
         }
 
@@ -690,15 +689,15 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsIslice {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "islice")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
     fn pyobject_to_opt_usize(obj: PyObjectRef, vm: &VirtualMachine) -> Option<usize> {
-        let is_int = objtype::isinstance(&obj, &vm.ctx.types.int_type);
+        let is_int = obj.isinstance(&vm.ctx.types.int_type);
         if is_int {
-            objint::get_value(&obj).to_usize()
+            int::get_value(&obj).to_usize()
         } else {
             None
         }
@@ -707,7 +706,7 @@ mod decl {
     #[pyimpl]
     impl PyItertoolsIslice {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        fn tp_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             let (iter, start, stop, step) = match args.args.len() {
                 0 | 1 => {
                     return Err(vm.new_type_error(format!(
@@ -785,7 +784,7 @@ mod decl {
 
             if let Some(stop) = self.stop {
                 if self.cur.load() >= stop {
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
             }
 
@@ -814,8 +813,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsFilterFalse {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "filterfalse")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -850,7 +849,7 @@ mod decl {
                     vm.invoke(predicate, vec![obj.clone()])?
                 };
 
-                if !objbool::boolval(vm, pred_value)? {
+                if !pybool::boolval(vm, pred_value)? {
                     return Ok(obj);
                 }
             }
@@ -872,8 +871,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsAccumulate {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "accumulate")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -956,23 +955,24 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsTee {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "tee")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
     #[pyimpl]
     impl PyItertoolsTee {
         fn from_iter(iterable: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+            let class = PyItertoolsTee::class(vm);
             let it = get_iter(vm, &iterable)?;
-            if it.lease_class().is(&PyItertoolsTee::class(vm)) {
-                return vm.call_method(&it, "__copy__", PyFuncArgs::from(vec![]));
+            if it.class().is(PyItertoolsTee::class(vm)) {
+                return vm.call_method(&it, "__copy__", ());
             }
             Ok(PyItertoolsTee {
                 tee_data: PyItertoolsTeeData::new(it, vm)?,
                 index: AtomicCell::new(0),
             }
-            .into_ref_with_type(vm, PyItertoolsTee::class(vm))?
+            .into_ref_with_type(vm, class.clone())?
             .into_object())
         }
 
@@ -988,16 +988,15 @@ mod decl {
         ) -> PyResult<PyTupleRef> {
             let n = n.unwrap_or(2);
 
-            let copyable = if iterable.lease_class().has_attr("__copy__") {
-                vm.call_method(&iterable, "__copy__", PyFuncArgs::from(vec![]))?
+            let copyable = if iterable.class().has_attr("__copy__") {
+                vm.call_method(&iterable, "__copy__", ())?
             } else {
                 PyItertoolsTee::from_iter(iterable, vm)?
             };
 
             let mut tee_vec: Vec<PyObjectRef> = Vec::with_capacity(n);
             for _ in 0..n {
-                let no_args = PyFuncArgs::from(vec![]);
-                tee_vec.push(vm.call_method(&copyable, "__copy__", no_args)?);
+                tee_vec.push(vm.call_method(&copyable, "__copy__", ())?);
             }
 
             Ok(PyTupleRef::with_elements(tee_vec, &vm.ctx))
@@ -1009,7 +1008,7 @@ mod decl {
                 tee_data: PyRc::clone(&self.tee_data),
                 index: AtomicCell::new(self.index.load()),
             }
-            .into_ref_with_type(vm, Self::class(vm))?
+            .into_ref_with_type(vm, Self::class(vm).clone())?
             .into_object())
         }
 
@@ -1037,8 +1036,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsProduct {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "product")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -1069,7 +1068,7 @@ mod decl {
 
                 pools.push(pool);
             }
-            let pools = iter::repeat(pools)
+            let pools = std::iter::repeat(pools)
                 .take(repeat)
                 .flatten()
                 .collect::<Vec<Vec<PyObjectRef>>>();
@@ -1089,14 +1088,14 @@ mod decl {
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             // stop signal
             if self.stop.load() {
-                return Err(new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             let pools = &self.pools;
 
             for p in pools {
                 if p.is_empty() {
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
             }
 
@@ -1154,8 +1153,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsCombinations {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "combinations")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -1197,7 +1196,7 @@ mod decl {
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             // stop signal
             if self.exhausted.load() {
-                return Err(new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             let n = self.pool.len();
@@ -1254,8 +1253,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsCombinationsWithReplacement {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "combinations_with_replacement")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -1297,7 +1296,7 @@ mod decl {
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             // stop signal
             if self.exhausted.load() {
-                return Err(new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             let n = self.pool.len();
@@ -1351,8 +1350,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsPermutations {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "permutations")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -1406,7 +1405,7 @@ mod decl {
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             // stop signal
             if self.exhausted.load() {
-                return Err(new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             let n = self.pool.len();
@@ -1451,7 +1450,7 @@ mod decl {
                 }
                 if !sentinel {
                     self.exhausted.store(true);
-                    return Err(new_stop_iteration(vm));
+                    return Err(vm.new_stop_iteration());
                 }
             } else {
                 // On the first pass, initialize result tuple using the indices
@@ -1478,8 +1477,8 @@ mod decl {
     }
 
     impl PyValue for PyItertoolsZipLongest {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("itertools", "zip_longest")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -1514,7 +1513,7 @@ mod decl {
         #[pymethod(name = "__next__")]
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             if self.iterators.is_empty() {
-                Err(new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             } else {
                 let mut result: Vec<PyObjectRef> = Vec::new();
                 let mut numactive = self.iterators.len();
@@ -1523,12 +1522,12 @@ mod decl {
                     let next_obj = match call_next(vm, &self.iterators[idx]) {
                         Ok(obj) => obj,
                         Err(err) => {
-                            if !objtype::isinstance(&err, &vm.ctx.exceptions.stop_iteration) {
+                            if !err.isinstance(&vm.ctx.exceptions.stop_iteration) {
                                 return Err(err);
                             }
                             numactive -= 1;
                             if numactive == 0 {
-                                return Err(new_stop_iteration(vm));
+                                return Err(vm.new_stop_iteration());
                             }
                             self.fillvalue.clone()
                         }

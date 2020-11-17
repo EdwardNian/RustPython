@@ -1,6 +1,6 @@
+use crate::builtins::bytes::PyBytes;
+use crate::builtins::pystr::PyStr;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::obj::objbytes::PyBytes;
-use crate::obj::objstr::PyStr;
 use crate::pyobject::{BorrowValue, PyObjectRef, PyResult};
 use crate::VirtualMachine;
 use std::{fmt, io};
@@ -26,8 +26,7 @@ impl Write for PyWriter<'_> {
     type Error = PyBaseExceptionRef;
     fn write_fmt(&mut self, args: fmt::Arguments) -> Result<(), Self::Error> {
         let PyWriter(obj, vm) = self;
-        vm.call_method(obj, "write", vec![vm.ctx.new_str(args.to_string())])
-            .map(drop)
+        vm.call_method(obj, "write", (args.to_string(),)).map(drop)
     }
 }
 

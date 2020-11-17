@@ -854,7 +854,7 @@ SOCK_MAX_SIZE = 16 * 1024 * 1024 + 1
 # requires_IEEE_754 = unittest.skipUnless(
 #     float.__getformat__("double").startswith("IEEE"),
 #     "test requires IEEE 754 doubles")
-requires_IEEE_754 = unittest.skip("TODO: RustPython doesn't run IEEE754 tests")
+requires_IEEE_754 = unittest.skipIf(False, "RustPython always has IEEE 754 floating point numbers")
 
 requires_zlib = unittest.skipUnless(zlib, 'requires zlib')
 
@@ -1066,12 +1066,15 @@ def temp_dir(path=None, quiet=False):
             try:
                 rmtree(path)
             except OSError as exc:
-                # XXX RUSTPYTHON: added quiet check here, not sure why rmtree fails on windows
-                if not quiet:
-                    raise
-                warnings.warn(f'unable to remove temporary'
-                              f'directory {path!r}: {exc}',
-                              RuntimeWarning, stacklevel=3)
+                # XXX RUSTPYTHON: something something async file removal?
+                #                 also part of the thing with rmtree()
+                #                 throwing PermissionError, I think
+                if os.path.exists(path):
+                    if not quiet:
+                        raise
+                    warnings.warn(f'unable to remove temporary'
+                                  f'directory {path!r}: {exc}',
+                                  RuntimeWarning, stacklevel=3)
 
 @contextlib.contextmanager
 def change_cwd(path, quiet=False):

@@ -2,10 +2,12 @@ pub(crate) use _collections::make_module;
 
 #[pymodule]
 mod _collections {
+    use crate::builtins::pytype::PyTypeRef;
     use crate::common::lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
     use crate::function::OptionalArg;
-    use crate::obj::{objiter, objtype::PyTypeRef};
-    use crate::pyobject::{PyComparisonValue, PyIterable, PyObjectRef, PyRef, PyResult, PyValue};
+    use crate::pyobject::{
+        PyComparisonValue, PyIterable, PyObjectRef, PyRef, PyResult, PyValue, StaticType,
+    };
     use crate::slots::{Comparable, PyComparisonOp};
     use crate::vm::ReprGuard;
     use crate::VirtualMachine;
@@ -25,8 +27,8 @@ mod _collections {
     type PyDequeRef = PyRef<PyDeque>;
 
     impl PyValue for PyDeque {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("_collections", "deque")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -357,8 +359,8 @@ mod _collections {
     }
 
     impl PyValue for PyDequeIterator {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("_collections", "_deque_iterator")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -372,7 +374,7 @@ mod _collections {
                 let ret = deque[pos].clone();
                 Ok(ret)
             } else {
-                Err(objiter::new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             }
         }
 

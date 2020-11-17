@@ -1,6 +1,7 @@
+use crate::builtins::pystr;
+use crate::common::float_ops;
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
-use crate::function::PyFuncArgs;
-use crate::obj::{objstr, objtype};
+use crate::function::FuncArgs;
 use crate::pyobject::{ItemProtocol, PyObjectRef, PyResult, TypeProtocol};
 use crate::vm::VirtualMachine;
 use itertools::{Itertools, PeekingNext};
@@ -399,15 +400,11 @@ impl FormatSpec {
                 magnitude if magnitude.is_infinite() => Ok("inf%".to_owned()),
                 _ => Ok(format!("{:.*}%", precision, magnitude * 100.0)),
             },
-            None => {
-                match magnitude {
-                    magnitude if magnitude.is_nan() => Ok("nan".to_owned()),
-                    magnitude if magnitude.is_infinite() => Ok("inf".to_owned()),
-                    // Using the Debug format here to prevent the automatic conversion of floats
-                    // ending in .0 to their integer representation (e.g., 1.0 -> 1)
-                    _ => Ok(format!("{:?}", magnitude)),
-                }
-            }
+            None => match magnitude {
+                magnitude if magnitude.is_nan() => Ok("nan".to_owned()),
+                magnitude if magnitude.is_infinite() => Ok("inf".to_owned()),
+                _ => Ok(float_ops::to_string(magnitude)),
+            },
         };
 
         if raw_magnitude_string_result.is_err() {
@@ -830,7 +827,7 @@ impl FormatString {
 
                     let value =
                         call_object_format(vm, argument, *preconversion_spec, &format_spec)?;
-                    objstr::clone_value(&value)
+                    pystr::clone_value(&value)
                 }
                 FormatPart::Literal(literal) => literal.clone(),
             };
@@ -839,7 +836,7 @@ impl FormatString {
         Ok(final_string)
     }
 
-    pub(crate) fn format(&self, arguments: &PyFuncArgs, vm: &VirtualMachine) -> PyResult<String> {
+    pub(crate) fn format(&self, arguments: &FuncArgs, vm: &VirtualMachine) -> PyResult<String> {
         let mut auto_argument_index: usize = 0;
         let mut seen_index = false;
         self.format_internal(vm, &mut |field_type| match field_type {
@@ -894,19 +891,17 @@ fn call_object_format(
     format_spec: &str,
 ) -> PyResult {
     let argument = match preconversion_spec.and_then(FormatPreconversor::from_char) {
-        Some(FormatPreconversor::Str) => vm.call_method(&argument, "__str__", vec![])?,
-        Some(FormatPreconversor::Repr) => vm.call_method(&argument, "__repr__", vec![])?,
-        Some(FormatPreconversor::Ascii) => vm.call_method(&argument, "__repr__", vec![])?,
-        Some(FormatPreconversor::Bytes) => vm.call_method(&argument, "decode", vec![])?,
+        Some(FormatPreconversor::Str) => vm.call_method(&argument, "__str__", ())?,
+        Some(FormatPreconversor::Repr) => vm.call_method(&argument, "__repr__", ())?,
+        Some(FormatPreconversor::Ascii) => vm.call_method(&argument, "__repr__", ())?,
+        Some(FormatPreconversor::Bytes) => vm.call_method(&argument, "decode", ())?,
         None => argument,
     };
-    let returned_type = vm.ctx.new_str(format_spec);
-
-    let result = vm.call_method(&argument, "__format__", vec![returned_type])?;
-    if !objtype::isinstance(&result, &vm.ctx.types.str_type) {
+    let result = vm.call_method(&argument, "__format__", (format_spec,))?;
+    if !result.isinstance(&vm.ctx.types.str_type) {
         return Err(vm.new_type_error(format!(
             "__format__ must return a str, not {}",
-            &result.lease_class().name
+            &result.class().name
         )));
     }
     Ok(result)

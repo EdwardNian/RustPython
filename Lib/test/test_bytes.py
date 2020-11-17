@@ -377,8 +377,6 @@ class BaseBytesTest:
             self.assertNotIn(f(b"dab"), b)
             self.assertNotIn(f(b"abd"), b)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_fromhex(self):
         self.assertRaises(TypeError, self.type2test.fromhex)
         self.assertRaises(TypeError, self.type2test.fromhex, 1)
@@ -416,8 +414,6 @@ class BaseBytesTest:
                 self.type2test.fromhex(data)
             self.assertIn('at position %s' % pos, str(cm.exception))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex(self):
         self.assertRaises(TypeError, self.type2test.hex)
         self.assertRaises(TypeError, self.type2test.hex, 1)
@@ -426,8 +422,6 @@ class BaseBytesTest:
         self.assertEqual(self.type2test(b"\x1a\x2b\x30").hex(), '1a2b30')
         self.assertEqual(memoryview(b"\x1a\x2b\x30").hex(), '1a2b30')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex_separator_basics(self):
         three_bytes = self.type2test(b'\xb9\x01\xef')
         self.assertEqual(three_bytes.hex(), 'b901ef')
@@ -469,8 +463,6 @@ class BaseBytesTest:
         five_bytes = self.type2test(range(90,95))
         self.assertEqual(five_bytes.hex(), '5a5b5c5d5e')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex_separator_six_bytes(self):
         six_bytes = self.type2test(x*3 for x in range(1, 7))
         self.assertEqual(six_bytes.hex(), '0306090c0f12')
@@ -647,8 +639,6 @@ class BaseBytesTest:
         self.assertEqual(b.rindex(i, 3, 9), 7)
         self.assertRaises(ValueError, b.rindex, w, 1, 3)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_mod(self):
         b = self.type2test(b'hello, %b!')
         orig = b
@@ -666,8 +656,6 @@ class BaseBytesTest:
         self.assertEqual(b, b'hello,\x00world!')
         self.assertIs(type(b), self.type2test)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_imod(self):
         b = self.type2test(b'hello, %b!')
         orig = b
@@ -820,7 +808,6 @@ class BaseBytesTest:
         self.assertRaises(ValueError, self.type2test.maketrans, b'abc', b'xyzq')
         self.assertRaises(TypeError, self.type2test.maketrans, 'abc', 'def')
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_none_arguments(self):
         # issue 11828
         b = self.type2test(b'hello')
@@ -940,8 +927,6 @@ class BytesTest(BaseBytesTest, unittest.TestCase):
         with self.assertRaisesRegex(TypeError, msg):
             b['a']
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_buffer_is_readonly(self):
         fd = os.open(__file__, os.O_RDONLY)
         with open(fd, "rb", buffering=0) as f:
@@ -1148,8 +1133,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
     def test_nohash(self):
         self.assertRaises(TypeError, hash, bytearray())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_bytearray_api(self):
         short_sample = b"Hello world\n"
         sample = short_sample + b"\0"*(20 - len(short_sample))
@@ -1550,8 +1533,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertEqual(b, b"")
         self.assertEqual(c, b"")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_resize_forbidden(self):
         # #4509: can't resize a bytearray when there are buffer exports, even
         # if it wouldn't reallocate the underlying buffer.
@@ -1871,8 +1852,6 @@ class SubclassTest:
         s3 = s1.join([b"abcd"])
         self.assertIs(type(s3), self.basetype)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle(self):
         a = self.type2test(b"abcd")
         a.x = 10
@@ -1886,8 +1865,6 @@ class SubclassTest:
             self.assertEqual(type(a), type(b))
             self.assertEqual(type(a.y), type(b.y))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy(self):
         a = self.type2test(b"abcd")
         a.x = 10

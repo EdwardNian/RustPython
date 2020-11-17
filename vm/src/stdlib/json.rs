@@ -4,13 +4,14 @@ mod machinery;
 #[pymodule]
 mod _json {
     use super::*;
+    use crate::builtins::pystr::PyStrRef;
+    use crate::builtins::{pybool, pytype::PyTypeRef};
     use crate::exceptions::PyBaseExceptionRef;
-    use crate::function::{OptionalArg, PyFuncArgs};
-    use crate::obj::objiter;
-    use crate::obj::objstr::PyStrRef;
-    use crate::obj::{objbool, objtype::PyTypeRef};
+    use crate::function::{FuncArgs, OptionalArg};
+    use crate::iterator;
     use crate::pyobject::{
-        BorrowValue, IdProtocol, IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+        BorrowValue, IdProtocol, IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType,
+        TryFromObject,
     };
     use crate::slots::Callable;
     use crate::VirtualMachine;
@@ -32,8 +33,8 @@ mod _json {
     }
 
     impl PyValue for JsonScanner {
-        fn class(vm: &VirtualMachine) -> PyTypeRef {
-            vm.class("_json", "make_scanner")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -41,7 +42,7 @@ mod _json {
     impl JsonScanner {
         #[pyslot]
         fn tp_new(cls: PyTypeRef, ctx: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-            let strict = objbool::boolval(vm, vm.get_attribute(ctx.clone(), "strict")?)?;
+            let strict = pybool::boolval(vm, vm.get_attribute(ctx.clone(), "strict")?)?;
             let object_hook = vm.option_if_none(vm.get_attribute(ctx.clone(), "object_hook")?);
             let object_pairs_hook =
                 vm.option_if_none(vm.get_attribute(ctx.clone(), "object_pairs_hook")?);
@@ -83,7 +84,7 @@ mod _json {
             let c = s
                 .chars()
                 .next()
-                .ok_or_else(|| objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
+                .ok_or_else(|| iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
             let next_idx = idx + c.len_utf8();
             match c {
                 '"' => {
@@ -95,14 +96,14 @@ mod _json {
                     let parse_obj = vm.get_attribute(self.ctx.clone(), "parse_object")?;
                     return vm.invoke(
                         &parse_obj,
-                        vec![
+                        (
                             vm.ctx
                                 .new_tuple(vec![pystr.into_object(), vm.ctx.new_int(next_idx)]),
-                            vm.ctx.new_bool(self.strict),
+                            self.strict,
                             scan_once,
-                            vm.unwrap_or_none(self.object_hook.clone()),
-                            vm.unwrap_or_none(self.object_pairs_hook.clone()),
-                        ],
+                            self.object_hook.clone(),
+                            self.object_pairs_hook.clone(),
+                        ),
                     );
                 }
                 '[' => {
@@ -140,7 +141,7 @@ mod _json {
                 ($s:literal) => {
                     if s.starts_with($s) {
                         return Ok(vm.ctx.new_tuple(vec![
-                            vm.invoke(&self.parse_constant, vec![vm.ctx.new_str($s.to_owned())])?,
+                            vm.invoke(&self.parse_constant, ($s.to_owned(),))?,
                             vm.ctx.new_int(idx + $s.len()),
                         ]));
                     }
@@ -151,7 +152,7 @@ mod _json {
             parse_constant!("Infinity");
             parse_constant!("-Infinity");
 
-            Err(objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))
+            Err(iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))
         }
 
         fn parse_number(&self, s: &str, vm: &VirtualMachine) -> Option<(PyResult, usize)> {
@@ -178,12 +179,12 @@ mod _json {
             let ret = if has_decimal || has_exponent {
                 // float
                 if let Some(ref parse_float) = self.parse_float {
-                    vm.invoke(parse_float, vec![vm.ctx.new_str(buf.to_owned())])
+                    vm.invoke(parse_float, (buf.to_owned(),))
                 } else {
                     Ok(vm.ctx.new_float(f64::from_str(buf).unwrap()))
                 }
             } else if let Some(ref parse_int) = self.parse_int {
-                vm.invoke(parse_int, vec![vm.ctx.new_str(buf.to_owned())])
+                vm.invoke(parse_int, (buf.to_owned(),))
             } else {
                 Ok(vm.ctx.new_int(BigInt::from_str(buf).unwrap()))
             };
@@ -199,7 +200,7 @@ mod _json {
             if idx > 0 {
                 chars
                     .nth(idx - 1)
-                    .ok_or_else(|| objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
+                    .ok_or_else(|| iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
             }
             zelf.parse(
                 chars.as_str(),
@@ -212,7 +213,7 @@ mod _json {
     }
 
     impl Callable for JsonScanner {
-        fn call(zelf: &PyRef<Self>, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             let (pystr, idx) = args.bind::<(PyStrRef, isize)>(vm)?;
             JsonScanner::call(zelf, pystr, idx, vm)
         }
@@ -244,14 +245,7 @@ mod _json {
     ) -> PyBaseExceptionRef {
         let get_error = || -> PyResult<_> {
             let cls = vm.try_class("json", "JSONDecodeError")?;
-            let exc = vm.invoke(
-                cls.as_object(),
-                vec![
-                    vm.ctx.new_str(e.msg),
-                    s.into_object(),
-                    vm.ctx.new_int(e.pos),
-                ],
-            )?;
+            let exc = vm.invoke(cls.as_object(), (e.msg, s, e.pos))?;
             PyBaseExceptionRef::try_from_object(vm, exc)
         };
         match get_error() {

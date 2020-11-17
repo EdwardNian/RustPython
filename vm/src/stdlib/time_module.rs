@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::naive::{NaiveDate, NaiveDateTime, NaiveTime};
 use chrono::{Datelike, Timelike};
 
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::tuple::PyTupleRef;
 use crate::function::OptionalArg;
-use crate::obj::objstr::PyStrRef;
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyTypeRef;
 use crate::pyobject::{
     BorrowValue, Either, PyClassImpl, PyObjectRef, PyResult, PyStructSequence, TryFromObject,
 };
@@ -218,14 +218,13 @@ impl PyStructTime {
     }
 
     fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-        self.into_struct_sequence(vm, vm.class("time", "struct_time"))
-            .unwrap()
-            .into_object()
+        self.into_struct_sequence(vm).unwrap().into_object()
     }
 
     #[pyslot]
-    fn tp_new(cls: PyTypeRef, seq: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
-        Self::try_from_object(vm, seq)?.into_struct_sequence(vm, cls)
+    fn tp_new(_cls: PyTypeRef, seq: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+        // cls is ignorable because this is not a basetype
+        Self::try_from_object(vm, seq)?.into_struct_sequence(vm)
     }
 }
 

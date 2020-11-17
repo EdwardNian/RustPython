@@ -3,16 +3,16 @@
  */
 use rand::Rng;
 
-use crate::bytecode::CodeObject;
+use crate::builtins::code::CodeObject;
+use crate::builtins::traceback::{PyTraceback, PyTracebackRef};
+use crate::builtins::{code, list};
+#[cfg(feature = "rustpython-compiler")]
+use crate::compile;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::obj::objtraceback::{PyTraceback, PyTracebackRef};
-use crate::obj::{objcode, objlist, objtype};
-use crate::pyobject::{ItemProtocol, PyResult, PyValue, TryFromObject};
+use crate::pyobject::{ItemProtocol, PyResult, PyValue, TryFromObject, TypeProtocol};
 use crate::scope::Scope;
 use crate::version::get_git_revision;
 use crate::vm::{InitParameter, VirtualMachine};
-#[cfg(feature = "rustpython-compiler")]
-use rustpython_compiler::compile;
 
 pub(crate) fn init_importlib(
     vm: &mut VirtualMachine,
@@ -34,7 +34,7 @@ pub(crate) fn init_importlib(
         enter_vm(vm, || {
             flame_guard!("install_external");
             let install_external = vm.get_attribute(importlib, "_install_external_importers")?;
-            vm.invoke(&install_external, vec![])?;
+            vm.invoke(&install_external, ())?;
             // Set pyc magic number to commit hash. Should be changed when bytecode will be more stable.
             let importlib_external = vm.import("_frozen_importlib_external", &[], 0)?;
             let mut magic = get_git_revision().into_bytes();
@@ -47,7 +47,7 @@ pub(crate) fn init_importlib(
                 let zipimport = vm.import("zipimport", &[], 0)?;
                 let zipimporter = vm.get_attribute(zipimport, "zipimporter")?;
                 let path_hooks = vm.get_attribute(vm.sys_module.clone(), "path_hooks")?;
-                let path_hooks = objlist::PyListRef::try_from_object(vm, path_hooks)?;
+                let path_hooks = list::PyListRef::try_from_object(vm, path_hooks)?;
                 path_hooks.insert(0, zipimporter);
                 Ok(())
             })();
@@ -100,7 +100,7 @@ pub fn import_file(
 ) -> PyResult {
     let code_obj = compile::compile(&content, compile::Mode::Exec, file_path, vm.compile_opts())
         .map_err(|err| vm.new_syntax_error(&err))?;
-    import_codeobj(vm, module_name, code_obj, true)
+    import_codeobj(vm, module_name, vm.map_codeobj(code_obj), true)
 }
 
 pub fn import_codeobj(
@@ -122,7 +122,7 @@ pub fn import_codeobj(
 
     // Execute main code in module:
     vm.run_code_obj(
-        objcode::PyCode::new(code_obj).into_ref(vm),
+        code::PyCode::new(code_obj).into_ref(vm),
         Scope::with_builtins(None, attrs, vm),
     )?;
     Ok(module)
@@ -174,7 +174,7 @@ pub fn remove_importlib_frames(
     vm: &VirtualMachine,
     exc: &PyBaseExceptionRef,
 ) -> PyBaseExceptionRef {
-    let always_trim = objtype::isinstance(exc, &vm.ctx.exceptions.import_error);
+    let always_trim = exc.isinstance(&vm.ctx.exceptions.import_error);
 
     if let Some(tb) = exc.traceback() {
         let trimmed_tb = remove_importlib_frames_inner(vm, Some(tb), always_trim).0;

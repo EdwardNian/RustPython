@@ -27,7 +27,6 @@ sha-1 = "0.8"
 sha2 = "0.8"
 sha3 = "0.8"
 blake2 = "0.8"
-volatile = "0.3"
 
 num-complex = { version = "0.3", features = ["serde"] }
 num-bigint = { version = "0.3", features = ["serde"] }
@@ -42,7 +41,7 @@ mt19937 = "1.0"
 log = "0.4"
 rustpython-derive = { path = "../derive", version = "0.1.2" }
 rustpython-parser = { path = "../parser", optional = true, version = "0.1.2" }
-rustpython-compiler = { path = "../compiler", optional = true, version = "0.1.2" }
+rustpython-compiler = { path = "../compiler/porcelain", optional = true, version = "0.1.2" }
 rustpython-bytecode = { path = "../bytecode", version = "0.1.2" }
 rustpython-jit = { path = "../jit", optional = true, version = "0.1.2" }
 rustpython-pylib = { path = "pylib-crate", optional = true, version = "0.1.0" }

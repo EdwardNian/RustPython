@@ -2,11 +2,11 @@ pub(crate) use decl::make_module;
 
 #[pymodule(name = "binascii")]
 mod decl {
+    use crate::builtins::bytearray::{PyByteArray, PyByteArrayRef};
+    use crate::builtins::bytes::{PyBytes, PyBytesRef};
+    use crate::builtins::pystr::{PyStr, PyStrRef};
     use crate::byteslike::PyBytesLike;
     use crate::function::OptionalArg;
-    use crate::obj::objbytearray::{PyByteArray, PyByteArrayRef};
-    use crate::obj::objbytes::{PyBytes, PyBytesRef};
-    use crate::obj::objstr::{PyStr, PyStrRef};
     use crate::pyobject::{BorrowValue, PyObjectRef, PyResult, TryFromObject, TypeProtocol};
     use crate::vm::VirtualMachine;
     use crc::{crc32, Hasher32};
@@ -34,7 +34,7 @@ mod decl {
                 }
                 obj => Err(vm.new_type_error(format!(
                     "argument should be bytes, buffer or ASCII string, not '{}'",
-                    obj.lease_class().name,
+                    obj.class().name,
                 ))),
             })
         }

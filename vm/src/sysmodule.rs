@@ -1,13 +1,12 @@
 use num_traits::ToPrimitive;
 use std::{env, mem, path};
 
+use crate::builtins::{PyStr, PyStrRef, PyTypeRef};
 use crate::common::hash::{PyHash, PyUHash};
 use crate::frame::FrameRef;
-use crate::function::{Args, OptionalArg, PyFuncArgs};
-use crate::obj::objstr::PyStrRef;
-use crate::obj::objtype::PyTypeRef;
+use crate::function::{Args, FuncArgs, OptionalArg};
 use crate::pyobject::{
-    IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyObjectRc, PyObjectRef, PyResult,
+    ItemProtocol, PyClassImpl, PyContext, PyObjectRc, PyObjectRef, PyRefExact, PyResult,
     PyStructSequence,
 };
 use crate::vm::{PySettings, VirtualMachine};
@@ -16,6 +15,8 @@ use crate::{builtins, exceptions, py_io, version};
 /*
  * The magic sys module.
  */
+const MAXSIZE: usize = std::isize::MAX as usize;
+const MAXUNICODE: u32 = std::char::MAX as u32;
 
 fn argv(vm: &VirtualMachine) -> PyObjectRef {
     vm.ctx.new_list(
@@ -130,7 +131,7 @@ impl SysFlags {
     }
 
     #[pyslot]
-    fn tp_new(_cls: PyTypeRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn tp_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         Err(vm.new_type_error("cannot create 'sys.flags' instances".to_owned()))
     }
 }
@@ -212,9 +213,8 @@ fn sys_setrecursionlimit(recursion_limit: i32, vm: &VirtualMachine) -> PyResult<
     }
 }
 
-// TODO implement string interning, this will be key for performance
-fn sys_intern(value: PyStrRef) -> PyStrRef {
-    value
+fn sys_intern(s: PyRefExact<PyStr>, vm: &VirtualMachine) -> PyStrRef {
+    vm.intern_string(s)
 }
 
 fn sys_exc_info(vm: &VirtualMachine) -> (PyObjectRef, PyObjectRef, PyObjectRef) {
@@ -237,7 +237,7 @@ fn sys_exit(code: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
     Err(vm.new_exception(vm.ctx.exceptions.system_exit.clone(), vec![code]))
 }
 
-fn sys_audit(_args: PyFuncArgs) {
+fn sys_audit(_args: FuncArgs) {
     // TODO: sys.audit implementation
 }
 
@@ -250,7 +250,7 @@ fn sys_displayhook(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
     vm.set_attr(&vm.builtins, "_", vm.ctx.none())?;
     // TODO: catch encoding errors
     let repr = vm.to_repr(&obj)?.into_object();
-    builtins::builtin_print(Args::new(vec![repr]), Default::default(), vm)?;
+    builtins::print(Args::new(vec![repr]), Default::default(), vm)?;
     vm.set_attr(&vm.builtins, "_", obj)?;
     Ok(())
 }
@@ -275,7 +275,7 @@ struct WindowsVersion {
 impl WindowsVersion {}
 
 #[cfg(windows)]
-fn sys_getwindowsversion(vm: &VirtualMachine) -> PyResult<crate::obj::objtuple::PyTupleRef> {
+fn sys_getwindowsversion(vm: &VirtualMachine) -> PyResult<crate::builtins::tuple::PyTupleRef> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use winapi::um::{
@@ -287,44 +287,44 @@ fn sys_getwindowsversion(vm: &VirtualMachine) -> PyResult<crate::obj::objtuple::
     version.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOEXW>() as u32;
     let result = unsafe {
         let osvi = &mut version as LPOSVERSIONINFOEXW as LPOSVERSIONINFOW;
-        // SAFE: GetVersionExW accepts a pointer of OSVERSIONINFOW, but winapi crate's type currently doesn't allow to do so.
+        // SAFETY: GetVersionExW accepts a pointer of OSVERSIONINFOW, but winapi crate's type currently doesn't allow to do so.
         // https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getversionexw#parameters
         GetVersionExW(osvi)
     };
 
     if result == 0 {
-        Err(vm.new_os_error("failed to get windows version".to_owned()))
-    } else {
-        let service_pack = {
-            let (last, _) = version
-                .szCSDVersion
-                .iter()
-                .take_while(|&x| x != &0)
-                .enumerate()
-                .last()
-                .unwrap_or((0, &0));
-            let sp = OsString::from_wide(&version.szCSDVersion[..last]);
-            sp.into_string()
-                .map_err(|_| vm.new_os_error("service pack is not ASCII".to_owned()))?
-        };
-        WindowsVersion {
-            major: version.dwMajorVersion,
-            minor: version.dwMinorVersion,
-            build: version.dwBuildNumber,
-            platform: version.dwPlatformId,
-            service_pack,
-            service_pack_major: version.wServicePackMajor,
-            service_pack_minor: version.wServicePackMinor,
-            suite_mask: version.wSuiteMask,
-            product_type: version.wProductType,
-            platform_version: (
-                version.dwMajorVersion,
-                version.dwMinorVersion,
-                version.dwBuildNumber,
-            ), // TODO Provide accurate version, like CPython impl
-        }
-        .into_struct_sequence(vm, vm.try_class("sys", "_getwindowsversion_type")?)
+        return Err(vm.new_os_error("failed to get windows version".to_owned()));
     }
+
+    let service_pack = {
+        let (last, _) = version
+            .szCSDVersion
+            .iter()
+            .take_while(|&x| x != &0)
+            .enumerate()
+            .last()
+            .unwrap_or((0, &0));
+        let sp = OsString::from_wide(&version.szCSDVersion[..last]);
+        sp.into_string()
+            .map_err(|_| vm.new_os_error("service pack is not ASCII".to_owned()))?
+    };
+    WindowsVersion {
+        major: version.dwMajorVersion,
+        minor: version.dwMinorVersion,
+        build: version.dwBuildNumber,
+        platform: version.dwPlatformId,
+        service_pack,
+        service_pack_major: version.wServicePackMajor,
+        service_pack_minor: version.wServicePackMinor,
+        suite_mask: version.wSuiteMask,
+        product_type: version.wProductType,
+        platform_version: (
+            version.dwMajorVersion,
+            version.dwMinorVersion,
+            version.dwBuildNumber,
+        ), // TODO Provide accurate version, like CPython impl
+    }
+    .into_struct_sequence(vm)
 }
 
 pub fn get_stdin(vm: &VirtualMachine) -> PyResult {
@@ -401,7 +401,7 @@ const ABIFLAGS: &str = "";
 // https://github.com/python/cpython/blob/3.8/configure.ac#L725
 const MULTIARCH: &str = env!("RUSTPYTHON_TARGET_TRIPLE");
 
-pub fn sysconfigdata_name() -> String {
+pub(crate) fn sysconfigdata_name() -> String {
     format!("_sysconfigdata_{}_{}_{}", ABIFLAGS, PLATFORM, MULTIARCH)
 }
 
@@ -457,7 +457,7 @@ impl PyFloatInfo {
         max: f64::MAX,
         max_exp: f64::MAX_EXP,
         max_10_exp: f64::MAX_10_EXP,
-        min: f64::MIN,
+        min: f64::MIN_POSITIVE,
         min_exp: f64::MIN_EXP,
         min_10_exp: f64::MIN_10_EXP,
         dig: f64::DIGITS,
@@ -482,33 +482,27 @@ impl PyIntInfo {
     };
 }
 
-pub fn make_module(vm: &VirtualMachine, module: PyObjectRef, builtins: PyObjectRef) {
+pub(crate) fn make_module(vm: &VirtualMachine, module: PyObjectRef, builtins: PyObjectRef) {
     let ctx = &vm.ctx;
 
-    let flags_type = SysFlags::make_class(ctx);
+    let _flags_type = SysFlags::make_class(ctx);
     let flags = SysFlags::from_settings(&vm.state.settings)
-        .into_struct_sequence(vm, flags_type)
+        .into_struct_sequence(vm)
         .unwrap();
 
-    let version_info_type = version::VersionInfo::make_class(ctx);
+    let _version_info_type = version::VersionInfo::make_class(ctx);
     let version_info = version::VersionInfo::VERSION
-        .into_struct_sequence(vm, version_info_type)
+        .into_struct_sequence(vm)
         .unwrap();
 
-    let hash_info_type = PyHashInfo::make_class(ctx);
-    let hash_info = PyHashInfo::INFO
-        .into_struct_sequence(vm, hash_info_type)
-        .unwrap();
+    let _hash_info_type = PyHashInfo::make_class(ctx);
+    let hash_info = PyHashInfo::INFO.into_struct_sequence(vm).unwrap();
 
-    let float_info_type = PyFloatInfo::make_class(ctx);
-    let float_info = PyFloatInfo::INFO
-        .into_struct_sequence(vm, float_info_type)
-        .unwrap();
+    let _float_info_type = PyFloatInfo::make_class(ctx);
+    let float_info = PyFloatInfo::INFO.into_struct_sequence(vm).unwrap();
 
-    let int_info_type = PyIntInfo::make_class(ctx);
-    let int_info = PyIntInfo::INFO
-        .into_struct_sequence(vm, int_info_type)
-        .unwrap();
+    let _int_info_type = PyIntInfo::make_class(ctx);
+    let int_info = PyIntInfo::INFO.into_struct_sequence(vm).unwrap();
 
     // TODO Add crate version to this namespace
     let implementation = py_namespace!(vm, {
@@ -634,7 +628,7 @@ settrace() -- set the global debug tracing function
     module_names.push("builtins".to_owned());
     module_names.sort();
     let builtin_module_names =
-        ctx.new_tuple(module_names.iter().map(|v| v.into_pyobject(vm)).collect());
+        ctx.new_tuple(module_names.into_iter().map(|n| ctx.new_str(n)).collect());
     let modules = ctx.new_dict();
 
     let prefix = option_env!("RUSTPYTHON_PREFIX").unwrap_or("/usr/local");
@@ -662,8 +656,8 @@ settrace() -- set the global debug tracing function
       "gettrace" => named_function!(ctx, sys, gettrace),
       "hash_info" => hash_info,
       "intern" => named_function!(ctx, sys, intern),
-      "maxunicode" => ctx.new_int(std::char::MAX as u32),
-      "maxsize" => ctx.new_int(std::isize::MAX),
+      "maxunicode" => ctx.new_int(MAXUNICODE),
+      "maxsize" => ctx.new_int(MAXSIZE),
       "path" => path,
       "ps1" => ctx.new_str(">>>>> "),
       "ps2" => ctx.new_str("..... "),
@@ -707,10 +701,9 @@ settrace() -- set the global debug tracing function
 
     #[cfg(windows)]
     {
-        let getwindowsversion = WindowsVersion::make_class(ctx);
+        WindowsVersion::make_class(ctx);
         extend_module!(vm, module, {
             "getwindowsversion" => named_function!(ctx, sys, getwindowsversion),
-            "_getwindowsversion_type" => getwindowsversion, // XXX: This is not a python spec but required by current RustPython implementation
         })
     }
 

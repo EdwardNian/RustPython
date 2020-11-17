@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 
+use crate::builtins::memory::Buffer;
+use crate::builtins::pystr::PyStrRef;
 use crate::common::hash::PyHash;
 use crate::common::lock::PyRwLock;
-use crate::function::{OptionalArg, PyFuncArgs, PyNativeFunc};
-use crate::obj::objstr::PyStrRef;
+use crate::function::{FuncArgs, OptionalArg, PyNativeFunc};
 use crate::pyobject::{
     Either, IdProtocol, PyComparisonValue, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
 };
@@ -41,7 +42,7 @@ impl Default for PyTpFlags {
     }
 }
 
-pub(crate) type GenericMethod = fn(&PyObjectRef, PyFuncArgs, &VirtualMachine) -> PyResult;
+pub(crate) type GenericMethod = fn(&PyObjectRef, FuncArgs, &VirtualMachine) -> PyResult;
 pub(crate) type DelFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult<()>;
 pub(crate) type DescrGetFunc =
     fn(PyObjectRef, Option<PyObjectRef>, Option<PyObjectRef>, &VirtualMachine) -> PyResult;
@@ -53,6 +54,7 @@ pub(crate) type CmpFunc = fn(
     &VirtualMachine,
 ) -> PyResult<Either<PyObjectRef, PyComparisonValue>>;
 pub(crate) type GetattroFunc = fn(PyObjectRef, PyStrRef, &VirtualMachine) -> PyResult;
+pub(crate) type BufferFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult<Box<dyn Buffer>>;
 
 #[derive(Default)]
 pub struct PyTypeSlots {
@@ -65,6 +67,7 @@ pub struct PyTypeSlots {
     pub hash: AtomicCell<Option<HashFunc>>,
     pub cmp: AtomicCell<Option<CmpFunc>>,
     pub getattro: AtomicCell<Option<GetattroFunc>>,
+    pub buffer: Option<BufferFunc>,
 }
 
 impl PyTypeSlots {
@@ -104,7 +107,7 @@ pub trait SlotDesctuctor: PyValue {
 #[pyimpl]
 pub trait Callable: PyValue {
     #[pyslot]
-    fn tp_call(zelf: &PyObjectRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn tp_call(zelf: &PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         if let Some(zelf) = zelf.downcast_ref() {
             Self::call(zelf, args, vm)
         } else {
@@ -112,10 +115,10 @@ pub trait Callable: PyValue {
         }
     }
     #[pymethod]
-    fn __call__(zelf: PyRef<Self>, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn __call__(zelf: PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         Self::call(&zelf, args, vm)
     }
-    fn call(zelf: &PyRef<Self>, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult;
+    fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult;
 }
 
 #[pyimpl]
@@ -180,7 +183,7 @@ pub trait SlotDescriptor: PyValue {
     where
         T: IdProtocol,
     {
-        cls.as_ref().map_or(false, |cls| cls.is(other))
+        cls.as_ref().map_or(false, |cls| other.is(cls))
     }
 }
 
@@ -401,4 +404,17 @@ pub trait SlotGetattro: PyValue {
     fn __getattribute__(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
         Self::getattro(zelf, name, vm)
     }
+}
+#[pyimpl]
+pub trait BufferProtocol: PyValue {
+    #[pyslot]
+    fn tp_buffer(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>> {
+        if let Some(zelf) = zelf.downcast_ref() {
+            Self::get_buffer(zelf, vm)
+        } else {
+            Err(vm.new_type_error("unexpected payload for get_buffer".to_owned()))
+        }
+    }
+
+    fn get_buffer(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>>;
 }

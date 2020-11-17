@@ -1,13 +1,13 @@
+use crate::builtins::dict::PyDictRef;
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::tuple::PyTupleRef;
 /// Implementation of the _thread module
 use crate::exceptions::{self, IntoPyException};
-use crate::function::{Args, KwArgs, OptionalArg, PyFuncArgs};
-use crate::obj::objdict::PyDictRef;
-use crate::obj::objstr::PyStrRef;
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyTypeRef;
+use crate::function::{FuncArgs, OptionalArg};
 use crate::pyobject::{
     BorrowValue, Either, IdProtocol, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef,
-    PyResult, PyValue, TypeProtocol,
+    PyResult, PyValue, StaticType, TypeProtocol,
 };
 use crate::slots::SlotGetattro;
 use crate::vm::VirtualMachine;
@@ -87,7 +87,7 @@ macro_rules! repr_lock_impl {
         format!(
             "<{} {} object at {}>",
             status,
-            $zelf.lease_class().name,
+            $zelf.class().name,
             $zelf.get_id()
         )
     }};
@@ -100,8 +100,8 @@ struct PyLock {
 type PyLockRef = PyRef<PyLock>;
 
 impl PyValue for PyLock {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_thread", "LockType")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -131,7 +131,7 @@ impl PyLock {
     }
 
     #[pymethod(magic)]
-    fn exit(&self, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+    fn exit(&self, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
         self.release(vm)
     }
 
@@ -153,8 +153,8 @@ struct PyRLock {
 }
 
 impl PyValue for PyRLock {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_thread", "RLock")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -192,7 +192,7 @@ impl PyRLock {
     }
 
     #[pymethod(magic)]
-    fn exit(&self, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+    fn exit(&self, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
         self.release(vm)
     }
 
@@ -222,10 +222,10 @@ fn _thread_start_new_thread(
     kwargs: OptionalArg<PyDictRef>,
     vm: &VirtualMachine,
 ) -> PyResult<u64> {
-    let args = PyFuncArgs::from((
-        Args::from(args.borrow_value().to_owned()),
-        KwArgs::from(kwargs.map_or_else(Default::default, |k| k.to_attributes())),
-    ));
+    let args = FuncArgs::new(
+        args.borrow_value().to_owned(),
+        kwargs.map_or_else(Default::default, |k| k.to_attributes()),
+    );
     let mut thread_builder = thread::Builder::new();
     let stacksize = vm.state.stacksize.load();
     if stacksize != 0 {
@@ -243,7 +243,7 @@ fn _thread_start_new_thread(
         .map_err(|err| err.into_pyexception(vm))
 }
 
-fn run_thread(func: PyCallable, args: PyFuncArgs, vm: &VirtualMachine) {
+fn run_thread(func: PyCallable, args: FuncArgs, vm: &VirtualMachine) {
     if let Err(exc) = func.invoke(args, vm) {
         // TODO: sys.unraisablehook
         let stderr = std::io::stderr();
@@ -291,8 +291,8 @@ struct PyLocal {
 }
 
 impl PyValue for PyLocal {
-    fn class(vm: &VirtualMachine) -> PyTypeRef {
-        vm.class("_thread", "_local")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -303,7 +303,7 @@ impl PyLocal {
     }
 
     #[pyslot]
-    fn tp_new(cls: PyTypeRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+    fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         PyLocal {
             data: ThreadLocal::new(),
         }

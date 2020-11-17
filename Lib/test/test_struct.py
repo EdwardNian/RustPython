@@ -469,8 +469,6 @@ class StructTest(unittest.TestCase):
         self.assertRaises((ValueError, struct.error), pack_into, small_buf, 2,
                           test_string)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_unpack_with_buffer(self):
         # SF bug 1563759: struct.unpack doesn't support buffer protocol objects
         data1 = array.array('B', b'\x12\x34\x56\x78')
@@ -522,8 +520,6 @@ class StructTest(unittest.TestCase):
         for c in [b'\x01', b'\x7f', b'\xff', b'\x0f', b'\xf0']:
             self.assertTrue(struct.unpack('>?', c)[0])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_count_overflow(self):
         hugecount = '{}b'.format(sys.maxsize+1)
         self.assertRaises(struct.error, struct.calcsize, hugecount)
@@ -623,8 +619,6 @@ class StructTest(unittest.TestCase):
                 "offset -11 out of range for 10-byte buffer"):
             struct.unpack_from('<B', byte_list, -11)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_boundary_error_message_with_large_offset(self):
         # Test overflows cause by large offset and value size (issue 30245)
         regex1 = (
@@ -697,8 +691,6 @@ class UnpackIteratorTest(unittest.TestCase):
         self.assertRaises(StopIteration, next, it)
         self.assertRaises(StopIteration, next, it)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_arbitrary_buffer(self):
         s = struct.Struct('>IB')
         b = bytes(range(1, 11))
